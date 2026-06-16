@@ -1,6 +1,3 @@
-# stock-data-factory
-
-This repository contains the stock-data-factory project.
 
 ## Overview
 
