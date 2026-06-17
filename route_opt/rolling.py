@@ -77,14 +77,16 @@ def _collect(mdl: FullModel, sol, cursor: int, trips: list[dict], boardings: lis
               if s.Value(mdl.toD[p, mi, j])]
         fd = [p for p in (pp.id for pp in inst.passengers) for mi in range(mdl.M)
               if s.Value(mdl.frD[p, mi, j])]
+        # 車両の A 帰着は運転区間のみ（C↔D は徒歩で配車不要）。
+        depD = dep + cd.d_depart_offset   # 帰還者が D を発つ時刻（D→C 徒歩 → C で乗車）
         trips.append({"kind": "CD", "site": D, "vehicle": veh,
                       "depart_A": dep, "arrive_site": arrD,
-                      "return_A": dep + cd.round_hours, "in": td, "out": fd,
+                      "return_A": dep + cd.drive_hours, "in": td, "out": fd,
                       "nAC": int(s.Value(mdl.nAC[j]))})
         for p in td:
             boardings.append({"passenger": p, "site": D, "event": "arrive", "t": arrD})
         for p in fd:
-            boardings.append({"passenger": p, "site": D, "event": "depart", "t": arrD})
+            boardings.append({"passenger": p, "site": D, "event": "depart", "t": depD})
 
 
 def _snapshot(mdl: FullModel, sol, w_start: datetime, prev_state: dict[str, InitialPassengerState],

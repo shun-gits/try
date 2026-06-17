@@ -25,7 +25,9 @@ def test_cd_used_and_optimal():
     sol = _solve(load_instance(CD_INSTANCE))
     assert sol.ok
     assert _cd_trip_count(sol) >= 1          # CD-arm が実際に使われる
-    assert sol.solver.ObjectiveValue() == 2400
+    # CD 車両費は運転区間 A→C+C→A=6h のみ（C↔D は徒歩で配車不要）。
+    # B-arm 800 + CD 2本×6h×100 = 2000。
+    assert sol.solver.ObjectiveValue() == 2000
 
 
 def test_rotation_alternation():

@@ -66,6 +66,18 @@ class CDArm(BaseModel):
     def round_hours(self) -> int:
         return self.to_d_hours + self.from_d_hours
 
+    @property
+    def drive_hours(self) -> int:
+        """車両が実際に占有する運転区間 A→C + C→A の合計（C↔D は徒歩のため除外）。"""
+        return self.a_c_hours + self.c_a_hours
+
+    @property
+    def d_depart_offset(self) -> int:
+        """CD トリップ出発 dep から、帰還者が D を発つ時刻までのオフセット。
+        車両は dep+a_c に C へ着き即 C→A へ折り返す（C での同時積替）。帰還者は
+        その便に C で乗るため d_c 前に D を発つ ⇒ d = dep + a_c - d_c。"""
+        return self.a_c_hours - self.d_c_hours
+
 
 class TemporarySite(BaseModel):
     """D（一時サイト, spec §16）。"""

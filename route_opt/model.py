@@ -89,8 +89,11 @@ class FullModel:
                 m.Add(self.depB[k, j] <= self.depB[k, j + 1])
 
         # ============ L1b: CD-arm トリップ ============
+        # 車両が占有するのは運転区間 A→C + C→A のみ（C↔D は徒歩 = 配車不要）。
+        # 乗客の往復総時間 round_hours と、車両拘束時間 drive_hours を区別する。
         self.usedCD, self.depCD, self.assignCD, self.capCD = {}, {}, {}, {}
-        thcd = cd.round_hours
+        thcd = cd.round_hours        # 乗客の論理往復（commit / 休日回避はこちらで保守的に判定）
+        drive = cd.drive_hours       # 車両の実拘束（インターバル / コスト）
         for j in range(JCD):
             used = m.NewBoolVar(f"usedCD_{j}")
             dep = m.NewIntVar(0, H, f"depCD_{j}")
@@ -102,8 +105,9 @@ class FullModel:
                 a = m.NewBoolVar(f"asgCD_{j}_{v.id}")
                 self.assignCD[j, v.id] = a
                 avs.append(a)
+                # 車両拘束は [dep, dep+drive]。C↔D 徒歩・D 滞在中は車両を解放。
                 veh_intervals[v.id].append(
-                    m.NewOptionalIntervalVar(dep, thcd, dep + thcd, a, f"ivCD_{j}_{v.id}")
+                    m.NewOptionalIntervalVar(dep, drive, dep + drive, a, f"ivCD_{j}_{v.id}")
                 )
             m.Add(sum(avs) == used)
             cap = m.NewIntVar(0, cap_max, f"capCD_{j}")
@@ -195,8 +199,11 @@ class FullModel:
                     m.Add(fd <= self.at[p, mi, D])
                     m.Add(td <= self.usedCD[j])
                     m.Add(fd <= self.usedCD[j])
+                    # 往路: A→C 乗車 + C→D 徒歩 で D 到着（= dep + a_c + c_d）。
                     m.Add(a == self.depCD[j] + cd.to_d_hours).OnlyEnforceIf(td)
-                    m.Add(d == self.depCD[j] + cd.to_d_hours).OnlyEnforceIf(fd)
+                    # 帰路: D→C 徒歩で C へ歩き、dep+a_c に折り返す車両へ乗車。
+                    #   ⇒ D 発 = dep + a_c - d_c（= dep + d_depart_offset）。
+                    m.Add(d == self.depCD[j] + cd.d_depart_offset).OnlyEnforceIf(fd)
 
             # スロット先詰め
             for mi in range(M - 1):
@@ -381,7 +388,8 @@ class FullModel:
                     terms.append(self.assignB[k, j, v.id] * th * v.hourly_cost)
         for j in range(JCD):
             for v in vehicles:
-                terms.append(self.assignCD[j, v.id] * cd.round_hours * v.hourly_cost)
+                # 車両費は運転区間 A→C + C→A のみ（C↔D は徒歩で配車不要）。
+                terms.append(self.assignCD[j, v.id] * cd.drive_hours * v.hourly_cost)
         m.Minimize(sum(terms))
 
     # ------------------------------------------------------------------
