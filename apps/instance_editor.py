@@ -14,6 +14,15 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import matplotlib.pyplot as plt  # noqa: E402
+
+# matplotlib 図中の日本語が文字化け（豆腐 □）するのを防ぐ。
+# japanize_matplotlib を import するだけで rcParams のフォントが日本語対応になる。
+try:
+    import japanize_matplotlib  # noqa: F401,E402
+except Exception:  # 未インストール環境でもアプリ自体は起動できるようにする
+    pass
+
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
@@ -430,12 +439,287 @@ def tab_run():
 
 
 # --------------------------------------------------------------------------
+# 配色（拠点種別ごと）
+_COL_A = "#4C72B0"  # A 本拠点
+_COL_B = "#55A868"  # B 有人サイト
+_COL_C = "#C44E52"  # C 中継点
+_COL_D = "#DD8452"  # D 一時サイト
+
+
+def _route_figure(doc: dict) -> plt.Figure:
+    """固定ルート A→B→A→C→D→C→A を巡回順序つきの 1 枚に統合して返す。
+
+    1 本の背骨（spine）に巡回順序 ① → ② → … と各区間の移動時間を載せ、
+    B ステップは「複数島のいずれか 1 つを選ぶ」ことを分岐（fan）で示す。
+    各島には往復時間と滞在レンジ、D には滞在レンジを併記する。
+    """
+    sites = doc.get("staffed_sites", {})
+    cd = doc.get("cd_arm")
+    tmp = doc.get("temporary_site")
+
+    # --- 固定順序で背骨ノードと区間を組み立てる ---
+    # nodes: (ラベル, 色, 補足文), legs: 区間ラベル（len == len(nodes) - 1）
+    nodes: list[tuple[str, str, str]] = [("A", _COL_A, "本拠点")]
+    legs: list[str] = []
+    b_idx: int | None = None  # 背骨上の B スロットの位置
+
+    if sites:
+        b_idx = len(nodes)
+        nodes.append(("B", _COL_B, "いずれか1島"))
+        nodes.append(("A", _COL_A, "立寄"))
+        legs += ["往路", "復路"]
+
+    if cd is not None:
+        nodes.append(("C", _COL_C, "中継点"))
+        legs.append(f"{cd.get('a_c_hours', '?')}h")
+        if tmp is not None:
+            table = tmp.get("d_stay_table", {})
+            d_sub = "一時サイト"
+            if table:
+                vals = list(table.values())
+                d_sub = f"滞在 {min(vals)}〜{max(vals)}h"
+            nodes.append(("D", _COL_D, d_sub))
+            nodes.append(("C", _COL_C, "中継点"))
+            legs += [f"{cd.get('c_d_hours', '?')}h", f"{cd.get('d_c_hours', '?')}h"]
+        legs.append(f"{cd.get('c_a_hours', '?')}h")
+        nodes.append(("A", _COL_A, "帰還"))
+
+    # --- 島分岐（fan）の位置決め ---
+    site_names = list(sites.keys())
+    n_isl = len(site_names)
+    dx = 1.7
+    xs = [i * dx for i in range(len(nodes))]
+    isl_y0, isl_dy = 1.4, 1.05
+    top = isl_y0 + max(n_isl - 1, 0) * isl_dy + 0.7 if n_isl else 1.1
+
+    fig, ax = plt.subplots(figsize=(max(9, len(nodes) * dx + 2.5),
+                                    max(3.6, 2.4 + n_isl * 0.95)))
+    ax.set_facecolor("#F8F8F8")
+    fig.patch.set_facecolor("#F8F8F8")
+    ax.set_xlim(-0.8, xs[-1] + 0.8)
+    ax.set_ylim(-1.05, top)
+    ax.axis("off")
+
+    # 背骨：区間矢印 + ステップ番号 + 区間ラベル
+    for i, leg in enumerate(legs):
+        x0, x1 = xs[i], xs[i + 1]
+        ax.annotate("", xy=(x1 - 0.32, 0), xytext=(x0 + 0.32, 0),
+                    arrowprops={"arrowstyle": "-|>", "color": "#555", "lw": 2.2},
+                    zorder=2)
+        xm = (x0 + x1) / 2
+        ax.scatter([xm], [0.42], s=340, color="white", edgecolors="#555",
+                   linewidths=1.6, zorder=4)
+        ax.text(xm, 0.42, f"{i + 1}", ha="center", va="center", fontsize=9.5,
+                fontweight="bold", color="#333", zorder=5)
+        ax.text(xm, -0.16, leg, ha="center", va="top", fontsize=8, color="#222",
+                zorder=5)
+
+    # 背骨：拠点ノード
+    for x, (label, color, sub) in zip(xs, nodes):
+        ax.scatter([x], [0], s=1700, color=color, edgecolors="white",
+                   linewidths=1.6, zorder=3)
+        ax.text(x, 0, label, ha="center", va="center", color="white",
+                fontsize=12, fontweight="bold", zorder=4)
+        if sub:
+            ax.text(x, -0.46, sub, ha="center", va="top", fontsize=8,
+                    color="#333", zorder=4)
+
+    # B スロットから各島への分岐（「いずれか 1 島を選ぶ」）
+    if b_idx is not None and n_isl:
+        bx = xs[b_idx]
+        trunk_top = isl_y0 + (n_isl - 1) * isl_dy
+        ax.plot([bx, bx], [0.34, trunk_top], ls=":", color=_COL_B, lw=1.4, zorder=1)
+        isl_x = bx + 0.55
+        for i, name in enumerate(site_names):
+            y = isl_y0 + i * isl_dy
+            s = sites[name]
+            seg = s.get("segments", {})
+            inb = seg.get("inbound_hours", "?")
+            out = seg.get("outbound_hours", "?")
+            stay = s.get("stay", {})
+            lo = stay.get("min_hours", 0)
+            hi = stay.get("max_hours", lo)
+            ax.plot([bx, isl_x - 0.2], [y, y], ls=":", color=_COL_B, lw=1.4, zorder=1)
+            ax.scatter([isl_x], [y], s=900, color=_COL_B, edgecolors="white",
+                       linewidths=1.4, zorder=3)
+            ax.text(isl_x, y, name, ha="center", va="center", color="white",
+                    fontsize=9, fontweight="bold", zorder=4)
+            ax.text(isl_x + 0.45, y, f"往 {inb}h ／ 復 {out}h ／ 滞在 {lo}〜{hi}h",
+                    ha="left", va="center", fontsize=8, color="#333", zorder=4)
+
+    # 凡例
+    legend_items = [
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=_COL_A,
+                   markersize=12, label="A 本拠点"),
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=_COL_B,
+                   markersize=12, label="B 有人サイト（いずれか1島）"),
+    ]
+    if cd is not None:
+        legend_items.append(plt.Line2D([0], [0], marker="o", color="w",
+                                       markerfacecolor=_COL_C, markersize=12, label="C 中継点"))
+    if tmp is not None:
+        legend_items.append(plt.Line2D([0], [0], marker="o", color="w",
+                                       markerfacecolor=_COL_D, markersize=12, label="D 一時サイト"))
+    ax.legend(handles=legend_items, loc="upper right", fontsize=8.5, framealpha=0.85)
+    ax.set_title("固定ルート ① → ② → … の順に巡回（数値は片道移動時間）",
+                 fontsize=12, pad=10)
+    fig.tight_layout()
+    return fig
+
+
+def _stay_figure(doc: dict) -> plt.Figure | None:
+    """滞在時間レンジの横棒チャートを返す。サイトがなければ None。"""
+    sites = doc.get("staffed_sites", {})
+    tmp = doc.get("temporary_site")
+
+    labels, mins, ranges = [], [], []
+    for name, s in sites.items():
+        stay = s.get("stay", {})
+        lo = stay.get("min_hours", 0)
+        hi = stay.get("max_hours", lo)
+        labels.append(name)
+        mins.append(lo)
+        ranges.append(max(hi - lo, 0))
+
+    if tmp is not None:
+        table = tmp.get("d_stay_table", {})
+        if table:
+            max_hours = max(table.values())
+            labels.append("D（一時サイト）")
+            mins.append(0)
+            ranges.append(max_hours)
+
+    if not labels:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7, max(2.5, len(labels) * 0.7 + 1.0)))
+    y = range(len(labels))
+    ax.barh(list(y), mins, color="none")  # invisible offset
+    ax.barh(list(y), ranges, left=mins, color="#4C72B0", alpha=0.75, label="滞在可能レンジ")
+    ax.scatter(mins, list(y), color="#2b5ea7", zorder=5, s=60, label="min")
+    max_vals = [m + r for m, r in zip(mins, ranges)]
+    ax.scatter(max_vals, list(y), color="#C44E52", marker="|", zorder=5, s=120, label="max")
+
+    for i, (lo, hi) in enumerate(zip(mins, max_vals)):
+        ax.text(lo, i, f" {lo}h", va="center", ha="left", fontsize=8, color="#2b5ea7")
+        ax.text(hi, i, f" {hi}h", va="center", ha="left", fontsize=8, color="#C44E52")
+
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("時間 (hours)")
+    ax.set_title("滞在時間レンジ（min ～ max）", fontsize=11)
+    ax.legend(loc="lower right", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def _staffing_table(doc: dict) -> pd.DataFrame | None:
+    """人員充足制約テーブルを DataFrame で返す。"""
+    sites = doc.get("staffed_sites", {})
+    if not sites:
+        return None
+
+    all_cats: list[str] = sorted({
+        cat
+        for s in sites.values()
+        for cat in s.get("category_requirements", {}).keys()
+    })
+
+    rows = []
+    for name, s in sites.items():
+        row: dict = {"サイト": name,
+                     "occupancy_min": s.get("occupancy_min", 0),
+                     "交代必須": "✓" if s.get("replacement_required", False) else ""}
+        for cat in all_cats:
+            row[cat] = s.get("category_requirements", {}).get(cat, 0)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _category_figure(doc: dict) -> plt.Figure | None:
+    """乗客カテゴリ分布の棒グラフを返す。乗客がいなければ None。"""
+    passengers = doc.get("passengers", [])
+    if not passengers:
+        return None
+
+    from collections import Counter
+    counts = Counter(p.get("category", "?") for p in passengers)
+    cats = sorted(counts.keys())
+    vals = [counts[c] for c in cats]
+
+    fig, ax = plt.subplots(figsize=(max(4, len(cats) * 0.9 + 1.5), 3.5))
+    bars = ax.bar(cats, vals, color="#55A868", alpha=0.85, width=0.6)
+    ax.bar_label(bars, padding=3, fontsize=10)
+    ax.set_xlabel("カテゴリ")
+    ax.set_ylabel("人数")
+    ax.set_title("乗客カテゴリ分布", fontsize=11)
+    ax.set_ylim(0, max(vals) * 1.25)
+    fig.tight_layout()
+    return fig
+
+
+def tab_visualize():
+    doc = get_doc()
+    st.subheader("制約可視化")
+    st.caption("現在の設定から経路構造・時間制約・人員制約を図示します。Sites タブや Passengers タブを変更するとリアルタイムで更新されます。")
+
+    sites = doc.get("staffed_sites", {})
+
+    # 1. ルート経路図（固定順序つき）
+    st.markdown("#### ルート経路図（巡回順序つき）")
+    if not sites and doc.get("cd_arm") is None:
+        st.info("サイトが未定義です。Sites タブで B 島を追加してください。")
+    else:
+        st.pyplot(_route_figure(doc))
+        st.caption(
+            "経路は **A（本拠点）→ B（複数島のいずれか1島）→ A → C → D → C → A（帰還）** に固定されています。"
+            "矢印上の ① → ② → … が巡回順序、数値は各区間の片道移動時間です。"
+            "B では複数の島から 1 つを選びます（点線の分岐）。"
+            "CD アームは必ず C を経由して D に到達します（A→D 直行は不可）。"
+        )
+
+    st.divider()
+
+    # 2. 滞在時間レンジ
+    st.markdown("#### 滞在時間レンジ")
+    stay_fig = _stay_figure(doc)
+    if stay_fig is None:
+        st.info("サイトが未定義のため表示できません。")
+    else:
+        st.pyplot(stay_fig)
+
+    st.divider()
+
+    # 3. 人員充足制約テーブル
+    st.markdown("#### 人員充足制約")
+    df = _staffing_table(doc)
+    if df is None:
+        st.info("サイトが未定義のため表示できません。")
+    else:
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.caption("各列はカテゴリ別の最低必要人数。occupancy_min はサイト全体の最低駐在人数。")
+
+    st.divider()
+
+    # 4. 乗客カテゴリ分布
+    st.markdown("#### 乗客カテゴリ分布")
+    cat_fig = _category_figure(doc)
+    if cat_fig is None:
+        st.info("乗客が未定義のため表示できません。Passengers タブで追加してください。")
+    else:
+        st.pyplot(cat_fig)
+        rules = doc.get("passenger_rules", {})
+        if rules:
+            st.caption(f"赴任制約あり乗客: {len(rules)} 名（Passengers タブの Passenger rules を参照）")
+
+
+# --------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Instance Editor", layout="wide")
     st.title("Fixed-Route Rotation — Instance Editor")
     get_doc()  # ensure init
     tabs = st.tabs(["Load/New", "General", "Vehicles & Fleet", "Sites",
-                    "Passengers", "Solver", "Validate & Save", "Run"])
+                    "Passengers", "Solver", "Validate & Save", "Run", "制約可視化"])
     with tabs[0]:
         tab_load()
     with tabs[1]:
@@ -452,6 +736,8 @@ def main():
         tab_save()
     with tabs[7]:
         tab_run()
+    with tabs[8]:
+        tab_visualize()
 
 
 main()

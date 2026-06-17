@@ -27,6 +27,7 @@ dependencies = [
     "langchain-openai",
     "ortools",
     "matplotlib",
+    "japanize-matplotlib",
     "pyyaml",
 ]
 
