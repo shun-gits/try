@@ -1,0 +1,5 @@
+passenger,site,start_h,end_h,ongoing
+P001,B1,0,30,False
+P001,D,36,48,False
+P001,B1,65,100,True
+P003,B1,30,65,False
