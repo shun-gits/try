@@ -1,0 +1,60 @@
+# CD-arm が必ず使われる検証用。B1 は Cat1 常駐必須・最大滞在36h。Cat1 は P001/P003 の2名のみ。
+# 100h を最大36hのスティントで連続カバーするには3スティント必要 → 同じ Cat1 が再登板するには
+# 間に D 勤務が必須（ローテーション交互順）→ CD-arm が使われる。
+# together は外して（[]）エスコート要員の連鎖を避け、CD 検証を単純化。
+planning_horizon:
+  start: 2026-01-01T00:00:00
+  end: 2026-01-05T04:00:00          # 100h
+time_granularity_hours: 1
+
+calendar:
+  holidays: []
+
+vehicle_types:
+  minivan: { capacity: 4, cost_per_hour: 100, rental_cost_per_hour: 150 }
+  truck:   { capacity: 10, cost_per_hour: 180, rental_cost_per_hour: 250 }
+
+fleet:
+  owned:
+    - { id: VAN001, type: minivan, initial_location: A }
+  rental:
+    enabled: true
+    initial_location: A
+    max_per_type: 1
+
+staffed_sites:
+  B1:
+    occupancy_min: 1
+    category_requirements: { Category1: 1 }
+    stay: { min_hours: 24, max_hours: 36 }
+    replacement_required: true
+    ride_together: []
+    segments: { inbound_hours: 2, outbound_hours: 2 }
+
+cd_arm:
+  a_c_hours: 3
+  c_d_hours: 1
+  d_c_hours: 1
+  c_a_hours: 3
+
+temporary_site:
+  d_stay_table: { 1: 12, 2: 18, 3: 24 }
+  occupancy_max: null
+
+passengers:
+  - { id: P001, category: Category1 }
+  - { id: P003, category: Category1 }
+
+passenger_rules:
+  P001: { allowed_sites: [B1] }
+  P003: { allowed_sites: [B1] }
+
+initial_state:
+  - { passenger_id: P001, location: B1, arrived_at: 2026-01-01T00:00:00 }
+  - { passenger_id: P003, location: A }
+
+solver:
+  max_visits_per_passenger: 4
+  trips_per_site: 8
+  trips_cd: 6
+  max_seconds: 60

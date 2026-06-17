@@ -25,6 +25,9 @@ dependencies = [
     "pydantic",
     "langchain-core",
     "langchain-openai",
+    "ortools",
+    "matplotlib",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +55,7 @@ ignore = ["E501"] # Line too long (handled by formatter usually, but E501 can be
 # first-party を import するファイルは、その import がトップに来ない（E402 は意図通り）。
 [tool.ruff.lint.per-file-ignores]
 "apps/corrections_gui.py" = ["E402"]
+"apps/instance_editor.py" = ["E402"]
 "scripts/inspect_pl_subtrees.py" = ["E402"]
 
 [tool.pytest.ini_options]
