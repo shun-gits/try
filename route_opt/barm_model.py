@@ -27,21 +27,13 @@ class _Vehicle:
     vtype: str
     capacity: int
     hourly_cost: int
-    is_rental: bool
 
 
 def _build_vehicles(inst: Instance) -> list[_Vehicle]:
     vs: list[_Vehicle] = []
     for ov in inst.fleet.owned:
         vt = inst.vehicle_types[ov.type]
-        vs.append(_Vehicle(ov.id, ov.type, vt.capacity, vt.cost_per_hour, False))
-    if inst.fleet.rental.enabled:
-        for tname, vt in inst.vehicle_types.items():
-            for i in range(inst.fleet.rental.max_per_type):
-                vs.append(
-                    _Vehicle(f"RENT_{tname}_{i+1}", tname, vt.capacity,
-                             vt.rental_cost_per_hour, True)
-                )
+        vs.append(_Vehicle(ov.id, ov.type, vt.capacity, vt.cost_per_hour))
     return vs
 
 

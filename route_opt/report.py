@@ -33,8 +33,14 @@ def build_stays(result: RollingResult, base: Instance) -> pd.DataFrame:
     for st in base.initial_state:
         if st.location == "A":
             continue
+        leg = st.transit_leg
+        if leg == ("C", "A"):
+            # D から A へ移動中: 初期滞在は無い（A 到着後は boardings で表現）。
+            continue
+        # A→C 移動中は D 到着（arrived_at）を D 滞在の開始として描く。
+        site = "D" if leg == ("A", "C") else st.location
         t0 = hour_offset(base, st.arrived_at) if st.arrived_at else 0
-        ev.setdefault(st.passenger_id, []).append((t0, "arrive", st.location))
+        ev.setdefault(st.passenger_id, []).append((t0, "arrive", site))
 
     rows = []
     for p, events in ev.items():
@@ -65,7 +71,9 @@ def trips_df(result: RollingResult) -> pd.DataFrame:
             "passengers_in": "|".join(t["in"]), "passengers_out": "|".join(t["out"]),
             "nAC": t.get("nAC", ""),
         })
-    return pd.DataFrame(rows).sort_values(["depart_A_h", "vehicle"]).reset_index(drop=True)
+    return (pd.DataFrame(rows)
+            .sort_values(["depart_A_h", "vehicle"], na_position="first")
+            .reset_index(drop=True))
 
 
 def write_csv(result: RollingResult, base: Instance, outdir: str | Path) -> dict[str, Path]:
@@ -93,7 +101,9 @@ def plot_gantt(result: RollingResult, base: Instance, outpath: str | Path) -> Pa
     stays = build_stays(result, base)
     H = result.total_hours
     pax = sorted(stays["passenger"].unique()) if not stays.empty else []
-    vehicles = sorted({t["vehicle"] for t in result.trips})
+    # 車両稼働は配車を伴うトリップ（CD-arm）のみ。B は徒歩で vehicle=None。
+    veh_trips = [t for t in result.trips if t["vehicle"] is not None]
+    vehicles = sorted({t["vehicle"] for t in veh_trips})
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(14, max(4, 0.4 * (len(pax) + len(vehicles)) + 3)),
@@ -123,15 +133,14 @@ def plot_gantt(result: RollingResult, base: Instance, outpath: str | Path) -> Pa
 
     # --- 車両稼働 ---
     yv = {v: i for i, v in enumerate(vehicles)}
-    for t in result.trips:
+    for t in veh_trips:
         x0 = t["depart_A"] / 24.0
         w = (t["return_A"] - t["depart_A"]) / 24.0
-        c = "#444" if t["kind"] == "CD" else "#888"
-        ax2.barh(yv[t["vehicle"]], w, left=x0, height=0.5, color=c,
+        ax2.barh(yv[t["vehicle"]], w, left=x0, height=0.5, color="#444",
                  edgecolor="black", linewidth=0.3)
     ax2.set_yticks(range(len(vehicles)))
     ax2.set_yticklabels(vehicles, fontsize=8)
-    ax2.set_title("Vehicle utilization (trips)  [dark = CD-arm, light = B-arm]")
+    ax2.set_title("Vehicle utilization (A-C / CD-arm only; B is on foot, no vehicle)")
     ax2.set_xlabel("days")
     ax2.set_xlim(0, H / 24.0)
     ax2.grid(axis="x", alpha=0.3)

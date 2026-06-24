@@ -24,7 +24,6 @@ from .schema import (
     Passenger,
     PassengerRule,
     PlanningHorizon,
-    Rental,
     Segments,
     SolverParams,
     StaffedSite,
@@ -42,8 +41,8 @@ def make_instance(*, days: int, islands: int, workers_per_island: int,
                   max_seconds: float) -> Instance:
     end = START + timedelta(days=days)
     vehicle_types = {
-        "minivan": VehicleType(capacity=4, cost_per_hour=100, rental_cost_per_hour=150),
-        "truck": VehicleType(capacity=10, cost_per_hour=180, rental_cost_per_hour=250),
+        "minivan": VehicleType(capacity=4, cost_per_hour=100),
+        "truck": VehicleType(capacity=10, cost_per_hour=180),
     }
     owned = [OwnedVehicle(id=f"VAN{i+1}", type="minivan") for i in range(vans)]
     owned += [OwnedVehicle(id=f"TRK{i+1}", type="truck") for i in range(trucks)]
@@ -77,7 +76,7 @@ def make_instance(*, days: int, islands: int, workers_per_island: int,
         planning_horizon=PlanningHorizon(start=START, end=end),
         calendar=Calendar(holidays=[]),
         vehicle_types=vehicle_types,
-        fleet=Fleet(owned=owned, rental=Rental(enabled=True, max_per_type=2)),
+        fleet=Fleet(owned=owned),
         staffed_sites=staffed,
         cd_arm=CDArm(a_c_hours=3, c_d_hours=1, d_c_hours=1, c_a_hours=3),
         temporary_site=TemporarySite(d_stay_table={1: 12, 2: 18, 3: 24, 4: 30},

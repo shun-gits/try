@@ -20,19 +20,25 @@ Fixed Route Workforce Rotation — CP-SAT Formulation
 0. モデリング方針（最重要の設計判断）
 
 本モデルは2層構造:
-  (L1) トリップ層    : 車両ディスパッチ（コスト発生主体）。アーム別に往復トリップを列挙。
+  (L1) トリップ層    : アーム別に往復トリップを列挙。CD-arm は車両ディスパッチ
+                       （唯一のコスト発生主体）、B-arm は徒歩の交代イベント。
   (L2) 乗客訪問層    : 各乗客の訪問列（B/D の滞在を時系列に並べた状態遷移）。
 両層を「乗車割当」変数で結合する。
 
 0.1 トリップ層：アーム別「往復トリップ列挙」方式
 
-固定ルート A→Bx→A→C→D→C→A は、物理的に2種の往復ディスパッチに分解できる。
+固定ルート A→Bx→A→C→D→C→A は、移動手段の観点で次のように分解できる。
+車両（配車）が要るのは A↔C 区間のみ。A↔Bx と C↔D は徒歩で、車両を消費せず
+コストも生まない（spec §6: A_C/C_A のみ allowed_vehicle_types を持つ）。
 
-- B-arm(k)  : A → k → A            （k ∈ {B1,B2,B3}、所要 din[k]+dout[k]）
-  到着便で交代者を運び、同一便・同一車両で帰還者を乗せて A へ戻る（spec §19）。
+- B-arm(k)  : A → k → A（徒歩, 所要 din[k]+dout[k]、k ∈ {B1,B2,B3}）
+  配車を伴わない「交代イベント」。usedB/depB は同時刻交代（到着＝出発）の
+  足場としてのみ用い、占有 min・カテゴリ・together・乗降タイミングを離散
+  イベントで評価する。車両割当・定員・コストは持たない。
 - CD-arm    : A → C → D → C → A     （A_C+C_D+D_C+C_A = 3+1+1+3 = 8h）
-  往路で D 行きを運び、復路で D 帰還者を回収する Backhaul（spec §19）。
-  C は通過点（乗降・滞在なし、spec §4）。実乗降は A / D / 各 B 島でのみ発生。
+  唯一の車両アーム。車両拘束・コストは運転区間 A↔C(=drive_hours 6h)のみ。
+  往路で D 行きを運び、復路で D 帰還者を回収する Backhaul（spec §19）。C は
+  通過点かつ車両⇔徒歩の折返しバッファ（spec §4）。実乗降は A / D / 各 B 島で発生。
 
 各アームに候補トリップ j = 1..J[a] を有限列挙し、used のものだけ運行（便数可変を上限内で表現）。
 
@@ -64,8 +70,7 @@ P            乗客集合, p ∈ P
 Cat          カテゴリ集合, c ∈ Cat（数任意, spec §9）
 K            常駐サイト(B島) = {B1,B2,B3}, k ∈ K
 S            訪問可能サイト = K ∪ {D}, s ∈ S
-Vown / Vrent 保有車両（個体）/ レンタルプール（上限 Nrent）
-V            = Vown ∪ Vrent
+V            保有車両（個体）。レンタルは扱わない。
 Arms         = { B-arm(k):k∈K } ∪ { CD-arm }
 Trips        = { (a,j) : a∈Arms, j=1..J[a] }
 M            乗客あたり訪問スロット数, m = 1..M
@@ -80,7 +85,8 @@ H, Hol⊆{0..H}（休日時間帯, spec §3）
 din[k],dout[k]; A_C,C_D,D_C,C_A 所要（spec §6,§12）
 cap[type], cost[type], rcost[type]（spec §7）
 occmin[k], catreq[k][c], smin[k], smax[k], together[k]（spec §12,13,15）
-dtable[n]  n=1..max定員（spec §16）
+dtable[w][n]  体重カテゴリ w・同乗総人数 n=1..max定員（従来形 dtable[n] は全 w 共通, spec §16）
+weight(p)  乗客 p の体重カテゴリ（small/large, spec §16）
 init_loc(p), init_arr(p)（spec §11）; init_veh(v)（spec §8）; Dmax（spec §4）
 
 ⸻
@@ -138,17 +144,16 @@ nAC[j] = Σ_{p,m} toD[p,m,j]       CD-arm トリップ j の A_C 同乗人数（
 (S1b) 帰還強制: at[p,m,k]=1 ∧ (a[p,m]+smax[k] ≤ H) ⇒ leaves[p,m]=1。
       期限 a+smax が horizon を超える最後の常駐者は計画末まで残れる（leaves=0 可）。
       ※これが無いと末端で必ず無限交代が必要になり実行不能化する（実装で確認）。
-(S2) at[p,m,D]=1 かつ toD[p,m,j]=1 ∧ leaves ⇒ d[p,m] ≥ a[p,m] + dtable[ nAC[j] ]（上限なし, spec §16）
+(S2) at[p,m,D]=1 かつ toD[p,m,j]=1 ∧ leaves ⇒ d[p,m] ≥ a[p,m] + dtable[ weight(p) ][ nAC[j] ]（上限なし, spec §16）
 
 4.4 車両容量（spec §18）— assignV との論理積で only-enforce-if
-(C1) Σ_{p,m} inB[p,m,k,j] ≤ cap[type(v)]   (assignV[B-arm(k),j,v]=1)
-(C2) Σ_{p,m} outB[p,m,k,j] ≤ cap[type(v)]
+※ B-arm は徒歩のため定員制約なし。車両定員が効くのは A↔C を走る CD-arm のみ。
 (C3) Σ_{p,m} toD[p,m,j] ≤ cap[type(v)]      (assignV[CD,j,v]=1)
 (C4) Σ_{p,m} frD[p,m,j] ≤ cap[type(v)]
 
 4.5 車両スケジューリング / Backhaul（spec §19）
 (V1) 同一車両が割当たる2トリップの運行区間 [dep,ret] は重ならない（NoOverlap）。
-(V2) Backhaul は往復1トリップ構造に内包（B-arm, CD-arm とも）。
+(V2) Backhaul は往復1トリップ構造に内包（CD-arm の A↔C 区間）。B-arm は徒歩のため対象外。
 (V3) 車両初期位置: 各車両の最初の使用トリップ出発地 = init_veh(v)（既定 A）。
 (V4) 対称性除去: dep[a,j] ≤ dep[a,j+1]（同一アーム内で時刻昇順）。
 
@@ -189,10 +194,11 @@ B-arm(k) 往路便 j、together[k] の各カテゴリ群 G について:
 
 5. Objective（spec §20）
 
-minimize  Σ_(a,j) Σ_v assignV[a,j,v] × trip_hours(a) × unit_cost(v)
+minimize  Σ_j Σ_v assignV[CD,j,v] × drive_hours × unit_cost(v)
 
-  trip_hours(B-arm(k)) = din[k]+dout[k]、trip_hours(CD-arm) = 8
-  unit_cost(v) = cost[type(v)]（保有）/ rcost[type(v)]（レンタル）
+  車両費は CD-arm（A↔C）のみ。drive_hours = A_C + C_A = 6h（C↔D は徒歩）。
+  B-arm は徒歩でコスト 0 のため目的関数に現れない。
+  unit_cost(v) = cost[type(v)]（保有車のみ。レンタルは扱わない）
 
 ⸻
 
@@ -207,7 +213,6 @@ minimize  Σ_(a,j) Σ_v assignV[a,j,v] × trip_hours(a) × unit_cost(v)
   M           = ⌈ H / 最短B周回 ⌉ 程度（例 ≈26）。乗客ごとに導出してよい（一律にしない）。
   J[B-arm(k)] = 島 k への到着イベント上限（例 ≈60）。
   J[CD-arm]   = D 訪問総数 ÷ 共有率（例 ≈120）。
-  Nrent       = ピーク需要から（例 ≈10）。
 
 変数規模（代表値）: 結合変数 toD/frD が支配項（≈ |P|·M·J[CD] ≈ 12.5万×2）。
 総 boolean ≈ 37万 + 時刻チャネリング制約。CP-SAT で可解だが重い部類。
@@ -252,7 +257,7 @@ Q5（将来）: 公平性・連続勤務上限は spec 未収集。必要時に 
   → 条件: overlap = W − C ≤ min_k(smax[k] − dout[k])（tail を単一常駐者で覆える）。
 - ウィンドウ終端（commit 時点）の状態を次ウィンドウの初期状態として引き継ぐ:
     location, arrived_at,
-    earliest_departure（D 滞在者の残り必要滞在 = arrival + dtable[nAC]）,
+    earliest_departure（D 滞在者の残り必要滞在 = arrival + dtable[weight(p)][nAC]）,
     last_duty（A 待機者の直前勤務種別。次ウィンドウ初スロットの btype を交互に固定）。
   ※last_duty が無いと §4.11 ローテーションが境界を越えて破れる（B→B が発生）。実装で確認・修正済。
 - 集約出力: route_opt/report.py が乗降イベントから滞在区間を再構成し CSV / Gantt(PNG) を生成。

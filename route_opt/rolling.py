@@ -55,12 +55,12 @@ def _collect(mdl: FullModel, sol, cursor: int, trips: list[dict], boardings: lis
             if not s.Value(mdl.usedB[k, j]):
                 continue
             dep = cursor + int(s.Value(mdl.depB[k, j]))
-            veh = next(v.id for v in mdl.vehicles if s.Value(mdl.assignB[k, j, v.id]))
             ins = [p for p in (pp.id for pp in inst.passengers) for mi in range(mdl.M)
                    if (p, mi, k, j) in mdl.inB and s.Value(mdl.inB[p, mi, k, j])]
             outs = [p for p in (pp.id for pp in inst.passengers) for mi in range(mdl.M)
                     if (p, mi, k, j) in mdl.outB and s.Value(mdl.outB[p, mi, k, j])]
-            trips.append({"kind": "B", "site": k, "vehicle": veh,
+            # A↔Bx は徒歩のため車両なし（vehicle=None）。
+            trips.append({"kind": "B", "site": k, "vehicle": None,
                           "depart_A": dep, "arrive_site": dep + din,
                           "return_A": dep + din + dout, "in": ins, "out": outs})
             for p in ins:
@@ -93,11 +93,7 @@ def _snapshot(mdl: FullModel, sol, w_start: datetime, prev_state: dict[str, Init
               ) -> list[InitialPassengerState]:
     """ウィンドウ終端（=window end）の各乗客状態を絶対時刻で返す。"""
     s, inst = sol.solver, mdl.inst
-    tbl = inst.temporary_site.d_stay_table
-    maxn = max(tbl.keys())
-    table = [0] * (maxn + 1)
-    for n, h in tbl.items():
-        table[n] = h
+    ts = inst.temporary_site
     out: list[InitialPassengerState] = []
     for p in (pp.id for pp in inst.passengers):
         used = [mi for mi in range(mdl.M) if s.Value(mdl.atused[p, mi])]
@@ -122,7 +118,8 @@ def _snapshot(mdl: FullModel, sol, w_start: datetime, prev_state: dict[str, Init
         else:
             toD_js = [j for j in range(mdl.JCD) if s.Value(mdl.toD[p, last, j])]
             if toD_js:
-                req = table[int(s.Value(mdl.nAC[toD_js[0]]))]
+                n = int(s.Value(mdl.nAC[toD_js[0]]))
+                req = ts.required_hours(inst.weight_of(p), n)
                 earliest = arrived_abs + timedelta(hours=req)
             else:
                 # 当ウィンドウで toD せず継続滞在中の初期 D 常駐者 → 前状態を引き継ぐ

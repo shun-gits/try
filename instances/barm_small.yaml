@@ -13,19 +13,13 @@ vehicle_types:
   minivan:
     capacity: 4
     cost_per_hour: 100
-    rental_cost_per_hour: 150
   truck:
     capacity: 10
     cost_per_hour: 180
-    rental_cost_per_hour: 250
 
 fleet:
   owned:
     - { id: VAN001, type: minivan, initial_location: A }
-  rental:
-    enabled: true
-    initial_location: A
-    max_per_type: 1
 
 staffed_sites:
   B1:
@@ -43,9 +37,9 @@ staffed_sites:
       outbound_hours: 2
 
 passengers:
-  - { id: P001, category: Category1 }
-  - { id: P002, category: Category2 }
-  - { id: P003, category: Category1 }
+  - { id: P001, category: Category1, weight: small }
+  - { id: P002, category: Category2, weight: large }
+  - { id: P003, category: Category1, weight: large }
 
 passenger_rules:
   P001: { allowed_sites: [B1] }
@@ -60,4 +54,4 @@ initial_state:
 solver:
   max_visits_per_passenger: 2
   trips_per_site: 3
-  max_seconds: 30
+  max_seconds: 130

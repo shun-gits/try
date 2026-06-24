@@ -14,6 +14,15 @@ Fixed Route Workforce Rotation Optimization Specification
   - together 同乗者はサイト滞在者になる旨を §15 に確定（v0.2 で追記済）
   - 参考実装（route_opt/）と、長 horizon 向けローリングホライズン分解を §20 に追記
   - §17 挿入に伴い旧 §17–21 を §18–22 に繰り下げ
+- v0.3 → v0.4:
+  - レンタル車両機能を廃止（保有車のみ）。vehicle_types.rental_cost_per_hour、
+    fleet.rental、目的関数のレンタル単価を削除（§7/§8/§20）。
+  - B-arm（A↔Bx）を徒歩扱いに変更。A↔Bx は車両を消費せず、定員制約・運行コスト・
+    Backhaul の対象外（交代は到着＝出発の同時刻イベントとして評価）。車両（配車）が
+    要るのは A↔C 区間のみ（§6/§18/§19/§20）。
+  - 乗客に体重区分 weight（small/large）を追加。D 必要滞在を「体重カテゴリ × 同乗
+    総人数」で引けるよう d_stay_rules.table を体重別入れ子に拡張（従来形 table[n] は
+    全カテゴリ共通として後方互換, §9/§16）。
 
 ⸻
 
@@ -117,13 +126,11 @@ vehicle_types:
   minivan:
     capacity: 4
     cost_per_hour: 100
-    rental_cost_per_hour: 150
   truck:
     capacity: 10
     cost_per_hour: 180
-    rental_cost_per_hour: 250
 
-運行コスト = duration_hours × cost_per_hour（保有車）または × rental_cost_per_hour（レンタル車）。
+運行コスト = duration_hours × cost_per_hour（保有車）。
 
 ⸻
 
@@ -142,10 +149,7 @@ fleet:
     - id: TRUCK001
       type: truck
       initial_location: A
-  rental:
-    enabled: true
-    initial_location: A        # レンタル車は必要時に確保。発出元は A（既定）。
-    # 追加台数は無制限に確保可能（コストは rental_cost_per_hour）。
+  # レンタル車両は扱わない（保有車のみ）。
 
 ⸻
 
@@ -158,8 +162,10 @@ spec.md は件数・カテゴリ体系を固定しない（以下は構造を示
 passengers:        # ← 例示。実データはパラメータファイルで増減する。
   - id: P001
     category: Category1
+    weight: small                # 体重区分 small/large（既定 small）。D 必要滞在の引きに使う（§16）
   - id: P002
     category: Category2
+    weight: large
 
 ⸻
 
@@ -311,23 +317,30 @@ type: together
 
 d_stay_rules:
   based_on_segment: A_C
-  # 人数は「その A_C 便の同乗人数（便単位）」。車両定員上限までテーブルに列挙する。
+  # 人数は「その A_C 便の同乗総人数（便単位）」。車両定員上限までテーブルに列挙する。
   # 値はインスタンスパラメータ（以下は例示。実際は 1..最大定員 まで定義）。
+  # 体重カテゴリを区別しない場合（従来形）:
   table:
     1: 24
     2: 36
     3: 48
     # ... 4..10（truck 定員上限まで）を実データで列挙
+  # 体重カテゴリ別に条件を変える場合は weight ごとに table を入れ子にする:
+  # table:
+  #   small: { 1: 24, 2: 36, 3: 48 }
+  #   large: { 1: 32, 2: 48, 3: 64 }
 
 定義:
-- A_C 便に同乗した人数 n により、その便で到着した各乗客の D 必要滞在時間 = table[n]。
-  人数は「その便の同乗人数」で確定し、到着時点で固定される（便ごとに独立）。
+- A_C 便に同乗した総人数 n と、各乗客の体重カテゴリにより、その便で到着した
+  各乗客の D 必要滞在時間 = table[weight][n]（体重を区別しない従来形では table[n]）。
+  人数は「その便の同乗総人数」で確定し、到着時点で固定される（便ごとに独立）。
 - A_C に乗車した者は全員 D へ向かう（C は通過点で降車・滞在しない）。
 - D 滞在は最低滞在時間（min）として扱う:
     departure_from_D >= arrival_at_D + table[n]
   上限（max）なし（確定）。table[n] 経過後はいつでも帰還可。
 - 帰還は個別。table[n] を満たした乗客は各自 D_C→C_A で帰還できる（同便でなくてよい）。
-- 同一便の乗客は同じ table[n] を共有するが、帰還タイミングは個別。
+- 同一便・同一体重カテゴリの乗客は同じ table[weight][n] を共有するが、帰還タイミングは個別。
+  体重カテゴリが異なれば同一便でも必要滞在時間は異なり得る。
 
 ⸻
 
@@ -351,6 +364,7 @@ D への輸送需要を生む駆動力。乗客単位の「勤務交互順」制
 18. Vehicle Capacity Constraints
 
 各車両の定員（vehicle_types.*.capacity）を超えて乗車してはならない。
+定員制約が効くのは配車を伴う A↔C（CD-arm）区間のみ。A↔Bx は徒歩のため定員制約の対象外。
 
 ⸻
 
@@ -358,8 +372,10 @@ D への輸送需要を生む駆動力。乗客単位の「勤務交互順」制
 
 - 同一車両は同時刻に複数便を実行できない。
 - A→C で利用した車両は C 到着後、C→A 便で利用可能（Backhaul：配送＋集荷を同一車両で行いコスト削減）。
-- A→Bx も同様に、到着便の車両がその場で Bx→A 便として別の人を乗せて帰れる（同一周回内の交代乗車）。
-- A_Bx / A_C 便は必要に応じて複数便発出可。ただし利用可能車両数・休日・滞在時間の制約を受ける。
+- A↔Bx は徒歩のため車両を消費せず、Backhaul・車両スケジューリングの対象外。
+  交代は到着＝出発の同時刻イベントとして評価する（同一周回内の交代乗車という概念は持たない）。
+- A_C 便は必要に応じて複数便発出可。ただし利用可能車両数・休日・滞在時間の制約を受ける。
+  A_Bx 便は徒歩のため車両数の制約を受けず、休日・滞在時間の制約のみを受ける。
 
 ⸻
 
@@ -368,11 +384,13 @@ D への輸送需要を生む駆動力。乗客単位の「勤務交互順」制
 最小化対象（車両運行費に一本化）:
 
 Minimize
-  Σ_(executed trips) duration_hours(trip) × unit_cost(vehicle, trip)
+  Σ_(executed CD trips) drive_hours × unit_cost(vehicle)
 
-  ここで unit_cost = cost_per_hour（保有車） または rental_cost_per_hour（レンタル車）
+  drive_hours = A_C + C_A（運転区間のみ。C↔D は徒歩で配車不要）
+  ここで unit_cost = cost_per_hour（保有車）
 
-運行時間コストは duration × 単価に内包されるため、独立項目としては持たない。
+車両費は配車を伴う CD-arm（A↔C）のみに発生する。A↔Bx は徒歩のためコスト 0 で
+目的関数に現れない。運行時間コストは duration × 単価に内包されるため、独立項目としては持たない。
 
 ⸻
 
@@ -402,7 +420,7 @@ Routing Solver は使用しない。
 
 インスタンスパラメータ（spec では固定しない／パラメータファイルで与える）:
 - §4  D.occupancy.max: 最大収容人数
-- §8  保有車両の台数・初期位置、レンタル発出元
+- §8  保有車両の台数・初期位置
 - §9  乗客・カテゴリ体系（件数・カテゴリ数は任意）
 - §11 各 B 島の初期常駐者
 - §12 各 B 島の値（常駐カテゴリ / stay / ride_constraints / segment 所要時間）

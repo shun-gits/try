@@ -10,16 +10,12 @@ calendar:
   holidays: []
 
 vehicle_types:
-  minivan: { capacity: 4, cost_per_hour: 100, rental_cost_per_hour: 150 }
-  truck:   { capacity: 10, cost_per_hour: 180, rental_cost_per_hour: 250 }
+  minivan: { capacity: 4, cost_per_hour: 100 }
+  truck:   { capacity: 10, cost_per_hour: 180 }
 
 fleet:
   owned:
     - { id: VAN001, type: minivan, initial_location: A }
-  rental:
-    enabled: true
-    initial_location: A
-    max_per_type: 1
 
 staffed_sites:
   B1:
@@ -38,14 +34,17 @@ cd_arm:
   c_a_hours: 3
 
 temporary_site:
-  d_stay_table: { 1: 12, 2: 18, 3: 24 }
+  # 体重カテゴリ × 同乗総人数 n -> 必要最低滞在h（large は小より長め）。
+  d_stay_table:
+    small: { 1: 12, 2: 18, 3: 24 }
+    large: { 1: 16, 2: 24, 3: 32 }
   occupancy_max: null
 
 passengers:
-  - { id: P001, category: Category1 }
-  - { id: P002, category: Category2 }
-  - { id: P003, category: Category1 }
-  - { id: P004, category: Category2 }
+  - { id: P001, category: Category1, weight: small }
+  - { id: P002, category: Category2, weight: large }
+  - { id: P003, category: Category1, weight: large }
+  - { id: P004, category: Category2, weight: small }
 
 passenger_rules:
   P001: { allowed_sites: [B1] }

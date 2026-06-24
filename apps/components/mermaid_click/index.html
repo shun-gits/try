@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: #F8F8F8; font-family: sans-serif; }
+  #wrap { padding: 8px; }
+  #graph { text-align: center; }
+  /* クリック可能ノードにカーソルとホバー強調を付ける */
+  #graph .clickable { cursor: pointer; }
+  #graph .clickable:hover { filter: brightness(1.08); }
+  #graph .node-selected > rect,
+  #graph .node-selected > polygon,
+  #graph .node-selected > circle { stroke: #222 !important; stroke-width: 3px !important; }
+  #hint { color: #888; font-size: 11px; text-align: center; padding: 2px 0 4px; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="graph" class="mermaid"></div>
+    <div id="hint">B 島ノードをクリックすると下の編集パネルが開きます</div>
+  </div>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "loose",
+      flowchart: { htmlLabels: true, curve: "basis" },
+    });
+
+    // --- Streamlit コンポーネント双方向プロトコル（streamlit-component-lib 不使用） ---
+    function post(type, extra) {
+      window.parent.postMessage(
+        Object.assign({ isStreamlitMessage: true, type }, extra || {}), "*");
+    }
+    function setFrameHeight(h) { post("streamlit:setFrameHeight", { height: h }); }
+    function setComponentValue(v) {
+      post("streamlit:setComponentValue", { value: v, dataType: "json" });
+    }
+
+    // mermaid の `click NODE call __nodeClicked()` から nodeId を受け取る
+    let selected = null;
+    window.__nodeClicked = (nodeId) => {
+      selected = nodeId;
+      markSelected(nodeId);
+      // 同じノードを続けて押しても発火するよう ts を付与
+      setComponentValue({ node: nodeId, ts: Date.now() });
+    };
+
+    function markSelected(nodeId) {
+      const g = document.getElementById("graph");
+      g.querySelectorAll(".node-selected").forEach(
+        (n) => n.classList.remove("node-selected"));
+      if (!nodeId) return;
+      // mermaid のノード id は "flowchart-<id>-NN" 形式
+      g.querySelectorAll('g.node[id^="flowchart-' + nodeId + '-"]')
+        .forEach((n) => n.classList.add("node-selected"));
+    }
+
+    let lastCode = null;
+    async function render(code, selNode) {
+      const el = document.getElementById("graph");
+      if (code !== lastCode) {
+        lastCode = code;
+        el.removeAttribute("data-processed");
+        el.innerHTML = "";
+        const id = "g" + Math.random().toString(36).slice(2);
+        const { svg, bindFunctions } = await mermaid.render(id, code);
+        el.innerHTML = svg;
+        if (bindFunctions) bindFunctions(el);
+      }
+      if (selNode !== undefined) { selected = selNode; }
+      markSelected(selected);
+      // レンダリング後に実高さへ調整
+      window.requestAnimationFrame(() =>
+        setFrameHeight(document.body.scrollHeight + 8));
+    }
+
+    // Streamlit からの render メッセージで mermaid ソースを受け取る
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.type !== "streamlit:render") return;
+      const args = data.args || {};
+      if (typeof args.code === "string") {
+        render(args.code, args.selected ?? undefined);
+      }
+    });
+
+    // ready を通知（これで Streamlit が render を送ってくる）
+    post("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight(420);
+  </script>
+</body>
+</html>

@@ -22,7 +22,7 @@ def test_yaml_roundtrip():
 
 
 def test_vehicle_types_roundtrip():
-    vt = {"minivan": {"capacity": 4, "cost_per_hour": 100, "rental_cost_per_hour": 150}}
+    vt = {"minivan": {"capacity": 4, "cost_per_hour": 100}}
     rows = gui_io.vehicle_types_to_rows(vt)
     assert gui_io.rows_to_vehicle_types(rows) == vt
 
@@ -35,6 +35,21 @@ def test_intmap_roundtrip_str_and_int_keys():
     dtable = {1: 12, 2: 18, 3: 24}
     rows = gui_io.intmap_to_rows(dtable, "n", "hours")
     assert gui_io.rows_to_intmap(rows, "n", "hours", int_key=True) == dtable
+
+
+def test_d_stay_table_flat_roundtrip():
+    flat = {1: 12, 2: 18, 3: 24}
+    rows = gui_io.d_stay_table_to_rows(flat)
+    assert all(r["weight"] == "*" for r in rows)
+    assert gui_io.rows_to_d_stay_table(rows) == flat
+    assert sorted(gui_io.d_stay_hours(flat)) == [12, 18, 24]
+
+
+def test_d_stay_table_per_weight_roundtrip():
+    per = {"small": {1: 12, 2: 18}, "large": {1: 16, 2: 24}}
+    rows = gui_io.d_stay_table_to_rows(per)
+    assert gui_io.rows_to_d_stay_table(rows) == per
+    assert sorted(gui_io.d_stay_hours(per)) == [12, 16, 18, 24]
 
 
 def test_ride_together_roundtrip():

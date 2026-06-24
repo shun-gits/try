@@ -11,16 +11,12 @@ calendar:
   holidays: []
 
 vehicle_types:
-  minivan: { capacity: 4, cost_per_hour: 100, rental_cost_per_hour: 150 }
-  truck:   { capacity: 10, cost_per_hour: 180, rental_cost_per_hour: 250 }
+  minivan: { capacity: 4, cost_per_hour: 100 }
+  truck:   { capacity: 10, cost_per_hour: 180 }
 
 fleet:
   owned:
     - { id: VAN001, type: minivan, initial_location: A }
-  rental:
-    enabled: true
-    initial_location: A
-    max_per_type: 1
 
 staffed_sites:
   B1:
@@ -42,8 +38,8 @@ temporary_site:
   occupancy_max: null
 
 passengers:
-  - { id: P001, category: Category1 }
-  - { id: P003, category: Category1 }
+  - { id: P001, category: Category1, weight: small }
+  - { id: P003, category: Category1, weight: large }
 
 passenger_rules:
   P001: { allowed_sites: [B1] }

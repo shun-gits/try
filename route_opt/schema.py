@@ -81,15 +81,38 @@ class CDArm(BaseModel):
 
 class TemporarySite(BaseModel):
     """D（一時サイト, spec §16）。"""
-    # 同乗人数 n -> 必要滞在h（min のみ, 上限なし）。n は 1..最大定員を列挙。
-    d_stay_table: dict[int, int]
+    # 必要滞在h（min のみ, 上限なし）。n は 1..最大定員を列挙。
+    # - 体重を区別しない場合（従来形）: {同乗人数 n -> h}        例 {1: 12, 2: 18}
+    # - 体重カテゴリ別に設定する場合 : {weight -> {n -> h}}      例
+    #     {"small": {1: 12, 2: 18}, "large": {1: 16, 2: 24}}
+    #   引きは「乗客の体重カテゴリ × その便の同乗総人数 n」。
+    d_stay_table: dict[str, dict[int, int]] | dict[int, int]
     occupancy_max: int | None = None
+
+    @property
+    def per_weight(self) -> bool:
+        """体重カテゴリ別テーブルか（値が dict なら per-weight, int なら全カテゴリ共通）。"""
+        return bool(self.d_stay_table) and all(
+            isinstance(v, dict) for v in self.d_stay_table.values()
+        )
+
+    def stay_table_for(self, weight: str) -> dict[int, int]:
+        """指定体重カテゴリの {n -> h} 表。per-weight でなければ全カテゴリ共通表。"""
+        if self.per_weight:
+            tbl = self.d_stay_table
+            if weight not in tbl:
+                raise KeyError(f"d_stay_table に体重カテゴリ '{weight}' の定義がありません")
+            return tbl[weight]  # type: ignore[return-value]
+        return self.d_stay_table  # type: ignore[return-value]
+
+    def required_hours(self, weight: str, n: int) -> int:
+        """体重カテゴリ weight・同乗総人数 n のときの必要最低滞在h（未定義 n は 0）。"""
+        return self.stay_table_for(weight).get(n, 0)
 
 
 class VehicleType(BaseModel):
     capacity: int
     cost_per_hour: int
-    rental_cost_per_hour: int
 
 
 class OwnedVehicle(BaseModel):
@@ -98,25 +121,27 @@ class OwnedVehicle(BaseModel):
     initial_location: str = "A"
 
 
-class Rental(BaseModel):
-    enabled: bool = True
-    initial_location: str = "A"
-    # 各車種ごとに確保しうるレンタル台数の上限。
-    max_per_type: int = 0
-
-
 class Fleet(BaseModel):
     owned: list[OwnedVehicle] = Field(default_factory=list)
-    rental: Rental = Field(default_factory=Rental)
 
 
 class Passenger(BaseModel):
     id: str
     category: str
+    # 体重区分（"small"=小 / "large"=大）。per-weight な d_stay_table 利用時は
+    # 「乗客の体重カテゴリ × 同乗総人数」で D 必要滞在を引くため最適化制約に影響する
+    # （従来形 table[n] のときは全カテゴリ共通＝weight 非依存）。
+    weight: str = "small"
 
 
 class PassengerRule(BaseModel):
     allowed_sites: list[str] = Field(default_factory=list)
+
+
+# 島間移動中（CD-arm の車両区間 A↔C 上）を表す location トークン。
+#   "A->C": A を発ち D へ向かう途中（往路便上）。到着先＝D。
+#   "C->A": D から A へ戻る途中（復路便上）。到着先＝A。
+TRANSIT_LEGS: dict[str, tuple[str, str]] = {"A->C": ("A", "C"), "C->A": ("C", "A")}
 
 
 class InitialPassengerState(BaseModel):
@@ -128,9 +153,14 @@ class InitialPassengerState(BaseModel):
     # handoff 用: A 待機者の「直前に完了した勤務種別」("B"/"D")。次の勤務はこれと交互でなければならない。
     last_duty: str | None = None
 
+    @property
+    def transit_leg(self) -> tuple[str, str] | None:
+        """location が島間移動中トークンなら (from, to) を返す。そうでなければ None。"""
+        return TRANSIT_LEGS.get(self.location)
+
 
 class SolverParams(BaseModel):
-    # 訪問スロット上限 M、サイト別トリップ上限 J、レンタル上限などの規模パラメータ。
+    # 訪問スロット上限 M、サイト別トリップ上限 J などの規模パラメータ。
     max_visits_per_passenger: int = 4
     trips_per_site: int = 8
     trips_cd: int = 8
@@ -159,9 +189,25 @@ class Instance(BaseModel):
         if self.time_granularity_hours != 1:
             raise ValueError("time_granularity_hours は現状 1h のみ対応")
         pids = {p.id for p in self.passengers}
+        allowed_loc = {"A", "D"} | set(self.staffed_sites) | set(TRANSIT_LEGS)
         for st in self.initial_state:
             if st.passenger_id not in pids:
                 raise ValueError(f"initial_state の未知の乗客: {st.passenger_id}")
+            if st.location not in allowed_loc:
+                raise ValueError(
+                    f"initial_state の未知の location '{st.location}'"
+                    f"（許可: {sorted(allowed_loc)}）"
+                )
+            if st.transit_leg is not None:
+                # 島間移動中（A↔C）は CD-arm が定義されていること・到着時刻が必須。
+                if self.cd_arm is None:
+                    raise ValueError(
+                        f"location '{st.location}' は cd_arm が必要（A↔C 車両区間）"
+                    )
+                if st.arrived_at is None:
+                    raise ValueError(
+                        f"location '{st.location}' は arrived_at（到着時刻）が必須"
+                    )
         for vt in (v.type for v in self.fleet.owned):
             if vt not in self.vehicle_types:
                 raise ValueError(f"未知の車種: {vt}")
@@ -171,6 +217,12 @@ class Instance(BaseModel):
             for s in rule.allowed_sites:
                 if s not in self.staffed_sites:
                     raise ValueError(f"allowed_sites の未知のサイト: {s}")
+        if self.temporary_site is not None and self.temporary_site.per_weight:
+            for w in {p.weight for p in self.passengers}:
+                if w not in self.temporary_site.d_stay_table:
+                    raise ValueError(
+                        f"temporary_site.d_stay_table に体重カテゴリ '{w}' の定義がありません"
+                    )
         return self
 
     # ---- 便利アクセサ ----
@@ -178,6 +230,12 @@ class Instance(BaseModel):
         for p in self.passengers:
             if p.id == pid:
                 return p.category
+        raise KeyError(pid)
+
+    def weight_of(self, pid: str) -> str:
+        for p in self.passengers:
+            if p.id == pid:
+                return p.weight
         raise KeyError(pid)
 
     def allowed_sites_of(self, pid: str) -> list[str]:
