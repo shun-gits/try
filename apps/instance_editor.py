@@ -653,7 +653,7 @@ def tab_save():
             st.code(str(e))
         else:
             INSTANCES.mkdir(exist_ok=True)
-            (INSTANCES / name).write_text(gui_io.yaml_from_doc(doc))
+            (INSTANCES / name).write_text(gui_io.yaml_from_doc(doc), encoding="utf-8")
             st.success(f"保存しました: instances/{name}")
     st.download_button("Download YAML", gui_io.yaml_from_doc(doc),
                        file_name="instance.yaml", mime="text/yaml",

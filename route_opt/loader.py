@@ -11,7 +11,7 @@ from .schema import Instance
 
 
 def load_instance(path: str | Path) -> Instance:
-    data = yaml.safe_load(Path(path).read_text())
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     return Instance.model_validate(data)
 
 
