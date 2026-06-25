@@ -19,7 +19,7 @@ from ortools.sat.python import cp_model
 
 from .barm_model import _build_vehicles
 from .loader import holiday_hour_intervals, hour_offset
-from .schema import Instance
+from .schema import Instance, expand_departures
 
 D = "D"  # 一時サイトのキー
 
@@ -110,29 +110,60 @@ class FullModel:
         self.usedCD, self.depCD, self.assignCD, self.capCD = {}, {}, {}, {}
         thcd = cd.round_hours        # 乗客の論理往復（commit / 休日回避はこちらで保守的に判定）
         drive = cd.drive_hours       # 車両の実拘束（インターバル / コスト）
+        # 固定ダイヤ: 各保有車両の a_c_departures を [0,commit] 全日に展開し、
+        # 便 = (出発時刻, 車両) ごとに 1 つ生成する。各便は当該車両のみが担当し、
+        # 出す/出さないのみ選ぶ（時刻は最適化対象外）。便ダイヤは全車の和で、同時刻に
+        # 複数車があれば各々が別便（＝定員スタック可）。いずれの車両にもダイヤが無い
+        # 場合のみ従来どおり自由ダイヤ（JCD=solver.trips_cd, 時刻は最適化対象）。
+        cd_trips = [(t, v) for v in vehicles
+                    for t in expand_departures(v.departures, commit, thcd)]
+        cd_trips.sort(key=lambda tv: (tv[0], tv[1].id))
+        self.cd_trips = cd_trips
+        timetabled = bool(cd_trips)
+        self.cd_sched = sorted({t for t, _ in cd_trips})
+        if timetabled:
+            # ダイヤ便数が CD トリップ数（窓内に便が無ければ 0 = 運休）。
+            JCD = self.JCD = len(cd_trips)
         for j in range(JCD):
             used = m.NewBoolVar(f"usedCD_{j}")
-            dep = m.NewIntVar(0, H, f"depCD_{j}")
-            self.usedCD[j], self.depCD[j] = used, dep
-            m.Add(dep == H).OnlyEnforceIf(used.Not())
-            m.Add(dep + thcd <= commit).OnlyEnforceIf(used)
-            avs = []
-            for v in vehicles:
-                a = m.NewBoolVar(f"asgCD_{j}_{v.id}")
-                self.assignCD[j, v.id] = a
-                avs.append(a)
+            if timetabled:
+                t, v = cd_trips[j]
+                dep = m.NewConstant(t)           # 出発はダイヤ時刻に固定
+                self.usedCD[j], self.depCD[j] = used, dep
+                # 便 j は車両 v が担当（割当 = used）。
+                self.assignCD[j, v.id] = used
                 # 車両拘束は [dep, dep+drive]。C↔D 徒歩・D 滞在中は車両を解放。
                 veh_intervals[v.id].append(
-                    m.NewOptionalIntervalVar(dep, drive, dep + drive, a, f"ivCD_{j}_{v.id}")
-                )
-            m.Add(sum(avs) == used)
-            cap = m.NewIntVar(0, cap_max, f"capCD_{j}")
-            m.Add(cap == sum(self.assignCD[j, v.id] * v.capacity for v in vehicles))
-            self.capCD[j] = cap
+                    m.NewOptionalIntervalVar(dep, drive, dep + drive, used,
+                                             f"ivCD_{j}_{v.id}"))
+                cap = m.NewIntVar(0, cap_max, f"capCD_{j}")
+                m.Add(cap == used * v.capacity)
+                self.capCD[j] = cap
+            else:
+                dep = m.NewIntVar(0, H, f"depCD_{j}")
+                m.Add(dep == H).OnlyEnforceIf(used.Not())
+                m.Add(dep + thcd <= commit).OnlyEnforceIf(used)
+                self.usedCD[j], self.depCD[j] = used, dep
+                avs = []
+                for v in vehicles:
+                    a = m.NewBoolVar(f"asgCD_{j}_{v.id}")
+                    self.assignCD[j, v.id] = a
+                    avs.append(a)
+                    veh_intervals[v.id].append(
+                        m.NewOptionalIntervalVar(dep, drive, dep + drive, a,
+                                                 f"ivCD_{j}_{v.id}"))
+                m.Add(sum(avs) == used)
+                cap = m.NewIntVar(0, cap_max, f"capCD_{j}")
+                m.Add(cap == sum(self.assignCD[j, v.id] * v.capacity for v in vehicles))
+                self.capCD[j] = cap
+            # 休日に当たるダイヤ便は used=0 に強制（自動運休）。
             self._no_overlap_holiday(dep, thcd, used, f"CD_{j}")
-        for j in range(JCD - 1):
-            m.Add(self.usedCD[j] >= self.usedCD[j + 1])
-            m.Add(self.depCD[j] <= self.depCD[j + 1])
+        if not timetabled:
+            # 自由ダイヤのみ: 互換トリップ間の対称性除去（早い便を先に詰める）。
+            # 固定ダイヤでは各便が別時刻/別車両のため used は独立。
+            for j in range(JCD - 1):
+                m.Add(self.usedCD[j] >= self.usedCD[j + 1])
+                m.Add(self.depCD[j] <= self.depCD[j + 1])
 
         # 車両 NoOverlap（B-arm と CD-arm を共有プールで）
         for v in vehicles:
@@ -415,10 +446,10 @@ class FullModel:
         # ============ 目的関数 ============
         # 車両費は A↔C を走る CD-arm のみ。A↔Bx は徒歩でコストを生まない。
         terms = []
-        for j in range(JCD):
-            for v in vehicles:
-                # 車両費は運転区間 A→C + C→A のみ（C↔D は徒歩で配車不要）。
-                terms.append(self.assignCD[j, v.id] * cd.drive_hours * v.hourly_cost)
+        cost_by_id = {v.id: v.hourly_cost for v in vehicles}
+        for (j, vid), a in self.assignCD.items():
+            # 車両費は運転区間 A→C + C→A のみ（C↔D は徒歩で配車不要）。
+            terms.append(a * cd.drive_hours * cost_by_id[vid])
         m.Minimize(sum(terms))
 
     # ------------------------------------------------------------------
@@ -481,7 +512,9 @@ class FullSolution:
         lines.append("--- CD-arm trips ---")
         for j in range(mdl.JCD):
             if s.Value(mdl.usedCD[j]):
-                veh = next(v.id for v in mdl.vehicles if s.Value(mdl.assignCD[j, v.id]))
+                veh = next(v.id for v in mdl.vehicles
+                           if (j, v.id) in mdl.assignCD
+                           and s.Value(mdl.assignCD[j, v.id]))
                 td = [p for p in pax for mi in range(mdl.M)
                       if s.Value(mdl.toD[p, mi, j])]
                 fd = [p for p in pax for mi in range(mdl.M)

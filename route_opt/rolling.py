@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .loader import hour_offset
-from .model import D, FullModel
+from .model import D, FullModel, SolutionRecorder
 from .schema import InitialPassengerState, Instance, SolverParams
 
 
@@ -167,7 +167,8 @@ def solve_rolling(base: Instance, window_days: float = 7.0, step_days: float = 5
         winst.solver = _window_solver_params(base.solver, commit)
 
         mdl = FullModel(winst)
-        sol = mdl.solve(hint=True)
+        rec = SolutionRecorder()
+        sol = mdl.solve(hint=True, callback=rec)
         if not sol.ok:
             return RollingResult(ok=False, total_cost=total_cost, windows=windows,
                                  trips=trips, boardings=boardings, total_hours=total_h,
@@ -183,7 +184,9 @@ def solve_rolling(base: Instance, window_days: float = 7.0, step_days: float = 5
         w = {"start_h": cursor, "look_h": lookahead, "commit_h": commit,
              "status": sol.solver.StatusName(sol.status),
              "cost": obj, "b_trips": nB, "cd_trips": nCD,
-             "wall": round(sol.solver.WallTime(), 1)}
+             "wall": round(sol.solver.WallTime(), 1),
+             # 当ウィンドウ内の改善解履歴（経過秒はウィンドウ求解開始からの相対）。GUI のグラフ用。
+             "improve": rec.rows}
         windows.append(w)
         if verbose:
             print(f"  win @{cursor:>3}h look={lookahead:>3} commit={commit:>3}: "

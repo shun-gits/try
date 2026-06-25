@@ -79,6 +79,24 @@ class CDArm(BaseModel):
         return self.a_c_hours - self.d_c_hours
 
 
+def expand_departures(departures: list[int], commit_h: int, round_h: int) -> list[int]:
+    """1日の出発時オフセット列を [0, commit_h] 全日に展開して返す。
+    各時オフセット τ を日ごとに d*24+τ と並べ、論理往復 round_h が commit 内に
+    収まる便のみ採用する。空なら空（=ダイヤ未設定）。"""
+    if not departures:
+        return []
+    times = sorted(set(departures))
+    out: list[int] = []
+    d = 0
+    while d * 24 + min(times) + round_h <= commit_h:
+        for tau in times:
+            t = d * 24 + tau
+            if t >= 0 and t + round_h <= commit_h:
+                out.append(t)
+        d += 1
+    return sorted(set(out))
+
+
 class TemporarySite(BaseModel):
     """D（一時サイト, spec §16）。"""
     # 必要滞在h（min のみ, 上限なし）。n は 1..最大定員を列挙。
@@ -119,10 +137,36 @@ class OwnedVehicle(BaseModel):
     id: str
     type: str
     initial_location: str = "A"
+    # 固定ダイヤ: この車両の A→C 便（往路フェリー Aout→Cwait）の「1日の出発時刻」。
+    # planning_horizon.start を 0 とした時オフセット（0..23 を想定）のリスト。
+    # 指定すると当該車両はこの時刻にのみ A→C を発し、ソルバは時刻を最適化せず
+    # 「各便を出す/出さない（積載）」のみを選ぶ。復路 C→A は折り返しで自動決定。
+    # 便ダイヤは全保有車両の和、各時刻スロットの提供定員は「その時刻に出発する
+    # 保有車両」で決まる。空（既定）なら当該車両はダイヤを持たない。
+    a_c_departures: list[int] = Field(default_factory=list)
+
+    def scheduled_departures(self, commit_h: int, round_h: int) -> list[int]:
+        """この車両の出発時刻を [0, commit_h] 全日に展開して返す。"""
+        return expand_departures(self.a_c_departures, commit_h, round_h)
 
 
 class Fleet(BaseModel):
     owned: list[OwnedVehicle] = Field(default_factory=list)
+
+    def has_timetable(self) -> bool:
+        """いずれかの保有車両に固定ダイヤが設定されているか。"""
+        return any(v.a_c_departures for v in self.owned)
+
+
+class Masters(BaseModel):
+    """category / weight のマスタ（選択肢の単一の源）。
+
+    GUI エディタは passengers の category / weight をここからの選択式にする。
+    空（未定義）なら検証は緩く、既存インスタンスとの後方互換を保つ。非空なら
+    passengers の category / weight が必ずマスタに含まれることを検証する。
+    """
+    categories: list[str] = Field(default_factory=list)
+    weights: list[str] = Field(default_factory=list)
 
 
 class Passenger(BaseModel):
@@ -179,6 +223,7 @@ class Instance(BaseModel):
     staffed_sites: dict[str, StaffedSite]
     cd_arm: CDArm | None = None
     temporary_site: TemporarySite | None = None
+    masters: Masters = Field(default_factory=Masters)
     passengers: list[Passenger]
     passenger_rules: dict[str, PassengerRule] = Field(default_factory=dict)
     initial_state: list[InitialPassengerState] = Field(default_factory=list)
@@ -188,6 +233,24 @@ class Instance(BaseModel):
     def _check(self) -> "Instance":
         if self.time_granularity_hours != 1:
             raise ValueError("time_granularity_hours は現状 1h のみ対応")
+        # masters が定義されていれば passengers の category / weight を制約する
+        # （空なら後方互換のため検証しない）。
+        if self.masters.categories:
+            allowed_cats = set(self.masters.categories)
+            for p in self.passengers:
+                if p.category not in allowed_cats:
+                    raise ValueError(
+                        f"passenger {p.id} の category '{p.category}' は "
+                        f"masters.categories に未定義です"
+                    )
+        if self.masters.weights:
+            allowed_w = set(self.masters.weights)
+            for p in self.passengers:
+                if p.weight not in allowed_w:
+                    raise ValueError(
+                        f"passenger {p.id} の weight '{p.weight}' は "
+                        f"masters.weights に未定義です"
+                    )
         pids = {p.id for p in self.passengers}
         allowed_loc = {"A", "D"} | set(self.staffed_sites) | set(TRANSIT_LEGS)
         for st in self.initial_state:

@@ -13,7 +13,7 @@ model.md v0.2 の §3/§4 を B-arm 部分集合に限定して実装する。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ortools.sat.python import cp_model
 
@@ -27,13 +27,15 @@ class _Vehicle:
     vtype: str
     capacity: int
     hourly_cost: int
+    departures: list[int] = field(default_factory=list)   # A→C 便の固定ダイヤ（時オフセット）
 
 
 def _build_vehicles(inst: Instance) -> list[_Vehicle]:
     vs: list[_Vehicle] = []
     for ov in inst.fleet.owned:
         vt = inst.vehicle_types[ov.type]
-        vs.append(_Vehicle(ov.id, ov.type, vt.capacity, vt.cost_per_hour))
+        vs.append(_Vehicle(ov.id, ov.type, vt.capacity, vt.cost_per_hour,
+                           list(ov.a_c_departures)))
     return vs
 
 

@@ -21,8 +21,11 @@
     <div id="hint">B 島ノードをクリックすると下の編集パネルが開きます</div>
   </div>
 
+  <!-- Streamlit in Snowflake は iframe からの外部 CDN 取得を CSP で遮断するため、
+       mermaid は同梱した UMD バンドル(window.mermaid)をローカルから読み込む。 -->
+  <script src="./mermaid.min.js"></script>
   <script type="module">
-    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    const mermaid = window.mermaid;
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "loose",

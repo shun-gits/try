@@ -58,6 +58,24 @@ def test_d_min_stay_respected():
                     assert stay >= min(tbl.values())
 
 
+def test_cd_fixed_timetable_pins_departures():
+    # 固定ダイヤ a_c_departures を与えると、A→C 便の出発はダイヤ時刻（時オフセット）
+    # にのみ固定され、ソルバは時刻を自由に最適化できない（便を出す/出さないのみ）。
+    inst = load_instance(CD_INSTANCE)
+    for ov in inst.fleet.owned:               # 1日2往復（各保有車両に同ダイヤ）
+        ov.a_c_departures = [6, 14]
+    sol = _solve(inst)
+    assert sol.ok
+    s, mdl = sol.solver, sol.model
+    assert _cd_trip_count(sol) >= 1
+    sched = set(mdl.cd_sched)
+    for j in range(mdl.JCD):
+        if s.Value(mdl.usedCD[j]):
+            dep = s.Value(mdl.depCD[j])
+            assert dep in sched                # ダイヤ上の時刻のみ
+            assert dep % 24 in (6, 14)         # 時オフセットが 6 or 14
+
+
 def test_short_horizon_no_cd():
     # 再循環不要の短い horizon では CD-arm は使われない（D 需要が生じない）。
     inst = load_instance(CD_INSTANCE)

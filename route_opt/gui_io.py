@@ -37,6 +37,86 @@ def doc_from_yaml(text: str) -> dict[str, Any]:
     return data
 
 
+# ---- masters (category / weight の選択肢の源) -----------------------------
+DEFAULT_WEIGHTS = ["small", "large"]
+
+
+def derive_categories(doc: dict[str, Any]) -> list[str]:
+    """doc の既存データから category を収集（passengers / category_requirements /
+    ride_together）。マスタ未定義の既存インスタンスを開いたときの自動補完に使う。"""
+    cats: set[str] = set()
+    for p in doc.get("passengers", []):
+        c = str(p.get("category", "")).strip()
+        if c:
+            cats.add(c)
+    for s in (doc.get("staffed_sites") or {}).values():
+        for k in (s.get("category_requirements") or {}):
+            if str(k).strip():
+                cats.add(str(k).strip())
+        for grp in s.get("ride_together", []) or []:
+            for c in grp:
+                if str(c).strip():
+                    cats.add(str(c).strip())
+    return sorted(cats)
+
+
+def derive_weights(doc: dict[str, Any]) -> list[str]:
+    """doc の既存データから weight を収集（small/large + passengers + d_stay_table）。"""
+    ws: list[str] = list(DEFAULT_WEIGHTS)
+    extra: set[str] = set()
+    for p in doc.get("passengers", []):
+        w = str(p.get("weight", "")).strip()
+        if w:
+            extra.add(w)
+    table = (doc.get("temporary_site") or {}).get("d_stay_table") or {}
+    if _is_per_weight(table):
+        for w in table:
+            if str(w).strip():
+                extra.add(str(w).strip())
+    return ws + sorted(extra - set(ws))
+
+
+def ensure_masters(doc: dict[str, Any]) -> dict[str, list[str]]:
+    """doc['masters'] を正規化して返す（無ければ既存データから自動補完）。
+
+    masters は category / weight 選択肢の単一の源。空のまま保存されると検証が
+    緩くなるため、初回アクセス時に既存利用値で seed して single source of truth を作る。
+    """
+    m = doc.get("masters")
+    if not isinstance(m, dict):
+        m = {}
+    cats = [str(c).strip() for c in m.get("categories", []) if str(c).strip()]
+    weights = [str(w).strip() for w in m.get("weights", []) if str(w).strip()]
+    if not cats:
+        cats = derive_categories(doc)
+    if not weights:
+        weights = derive_weights(doc)
+    doc["masters"] = {"categories": cats, "weights": weights}
+    return doc["masters"]
+
+
+def _union_keep_order(primary: list[str], extra: list[str]) -> list[str]:
+    out = list(primary)
+    for x in extra:
+        if x not in out:
+            out.append(x)
+    return out
+
+
+def category_options(doc: dict[str, Any]) -> list[str]:
+    """passengers の category ドロップダウン候補（マスタ ∪ 既存利用値）。
+
+    マスタから外れた既存値があってもドロップダウンが空欄化しないよう union する。"""
+    m = ensure_masters(doc)
+    return _union_keep_order(m["categories"], derive_categories(doc))
+
+
+def weight_options(doc: dict[str, Any]) -> list[str]:
+    """passengers の weight ドロップダウン候補（マスタ ∪ small/large ∪ 既存利用値）。"""
+    m = ensure_masters(doc)
+    return _union_keep_order(m["weights"], derive_weights(doc))
+
+
 # ---- vehicle_types  (name -> {capacity, cost_per_hour}) ----
 def vehicle_types_to_rows(vt: dict[str, dict]) -> list[dict]:
     return [
@@ -157,3 +237,26 @@ def rows_to_passenger_rules(rows: list[dict]) -> dict[str, dict]:
         sites = [s.strip() for s in str(r.get("allowed_sites", "")).split(",") if s.strip()]
         out[pid] = {"allowed_sites": sites}
     return out
+
+
+# ---- initial_state（GUI で編集しない handoff フィールドの保持） ----
+# Passengers タブの initial_state エディタは location / arrived_at だけを編集し、
+# 各レコードを作り直す。そのため UI を持たないスキーマ項目（earliest_departure /
+# last_duty などローリング handoff 用。model.py の制約に影響する）が再構築で
+# 失われてしまう。読み込んだ既存値を引き継ぎ、save/load の round-trip で
+# 失わないようにする。新規 InitialPassengerState 項目もここを通せば自動で残る。
+_INIT_STATE_EDITED_KEYS = ("passenger_id", "location", "arrived_at")
+
+
+def merge_initial_state(prev: dict, pid: str, location: str,
+                        arrived_at: str | None) -> dict:
+    """UI で編集した値（pid/location/arrived_at）と、編集 UI を持たない既存
+    フィールド（prev に入っている earliest_departure / last_duty 等）を統合した
+    initial_state レコードを返す。arrived_at が空なら省略（＝計画開始時刻扱い）。"""
+    rec: dict = {"passenger_id": pid, "location": location}
+    if arrived_at:
+        rec["arrived_at"] = arrived_at
+    for k, v in prev.items():
+        if k not in _INIT_STATE_EDITED_KEYS:
+            rec[k] = v
+    return rec
