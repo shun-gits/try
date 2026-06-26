@@ -425,23 +425,27 @@ class FullModel:
                 m.Add(occ <= dmax)
                 occ_prev = occ
 
-        # ============ together（B 入域便） ============
+        # ============ together（B 入域便・退域便に対称適用） ============
+        # 同一 together 群は、入域(A→Bx)便でも退域(Bx→A)便でも「全員揃う or
+        # 全員不在」を満たす。これにより群はペアで島に入り、ペアで島を出る
+        # （spec §15, model.md §4.7）。
         for k in bsites:
             site = inst.staffed_sites[k]
             elig = [p for p in pax if k in inst.allowed_sites_of(p)]
             for group in site.ride_together:
+                gl = list(group)
                 for j in range(J):
-                    has = {}
-                    for c in group:
-                        cnt = sum(self.inB[p, mi, k, j] for p in elig
-                                  if inst.category_of(p) == c for mi in range(M))
-                        hc = m.NewBoolVar(f"has_{k}_{j}_{c}")
-                        m.Add(cnt >= 1).OnlyEnforceIf(hc)
-                        m.Add(cnt == 0).OnlyEnforceIf(hc.Not())
-                        has[c] = hc
-                    gl = list(group)
-                    for ci in range(len(gl) - 1):
-                        m.Add(has[gl[ci]] == has[gl[ci + 1]])
+                    for tag, link in (("in", self.inB), ("out", self.outB)):
+                        has = {}
+                        for c in group:
+                            cnt = sum(link[p, mi, k, j] for p in elig
+                                      if inst.category_of(p) == c for mi in range(M))
+                            hc = m.NewBoolVar(f"has_{tag}_{k}_{j}_{c}")
+                            m.Add(cnt >= 1).OnlyEnforceIf(hc)
+                            m.Add(cnt == 0).OnlyEnforceIf(hc.Not())
+                            has[c] = hc
+                        for ci in range(len(gl) - 1):
+                            m.Add(has[gl[ci]] == has[gl[ci + 1]])
 
         # ============ 目的関数 ============
         # 車両費は A↔C を走る CD-arm のみ。A↔Bx は徒歩でコストを生まない。

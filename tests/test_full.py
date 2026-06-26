@@ -92,6 +92,51 @@ def test_together_escort_chain_infeasible():
     assert sol.status == cp_model.INFEASIBLE
 
 
+def test_together_pairs_in_and_out():
+    # together 群は入域便だけでなく退域便でも「全員揃う or 全員不在」（spec §15）。
+    # B1 に together [Cat1, Cat2] のペアを初期常駐させ、ローテーションで島を出る際、
+    # 両者が同一退域便で出ること（ペア同時退出）を検証する。
+    from route_opt.schema import Passenger, PassengerRule
+
+    inst = load_instance(CD_INSTANCE)
+    site = inst.staffed_sites["B1"]
+    site.ride_together = [["Category1", "Category2"]]
+    site.occupancy_min = 0            # 後任不要にして escort 連鎖を断つ
+    site.category_requirements = {}
+    site.replacement_required = False
+    site.stay.max_hours = 36
+    inst.passengers = [
+        Passenger(id="P001", category="Category1", weight="small"),
+        Passenger(id="P002", category="Category2", weight="small"),
+    ]
+    inst.passenger_rules = {
+        "P001": PassengerRule(allowed_sites=["B1"]),
+        "P002": PassengerRule(allowed_sites=["B1"]),
+    }
+    inst.initial_state = [
+        InitialPassengerState(passenger_id="P001", location="B1",
+                              arrived_at=datetime(2026, 1, 1, 0, 0, 0)),
+        InitialPassengerState(passenger_id="P002", location="B1",
+                              arrived_at=datetime(2026, 1, 1, 0, 0, 0)),
+    ]
+    sol = _solve(inst)
+    assert sol.ok
+    s, mdl = sol.solver, sol.model
+    out_events = 0
+    for j in range(mdl.J):
+        o1 = sum(s.Value(mdl.outB["P001", mi, "B1", j]) for mi in range(mdl.M))
+        o2 = sum(s.Value(mdl.outB["P002", mi, "B1", j]) for mi in range(mdl.M))
+        i1 = sum(s.Value(mdl.inB["P001", mi, "B1", j]) for mi in range(mdl.M))
+        i2 = sum(s.Value(mdl.inB["P002", mi, "B1", j]) for mi in range(mdl.M))
+        # 各便で群は揃う or 不在（入域・退域とも）
+        assert o1 == o2, f"trip{j}: 退域がペアで揃っていない (P001={o1}, P002={o2})"
+        assert i1 == i2, f"trip{j}: 入域がペアで揃っていない (P001={i1}, P002={i2})"
+        if o1:
+            out_events += 1
+    # 実際に「ペア同時退出」イベントが発生していること（テストが空振りでない）
+    assert out_events >= 1
+
+
 def _first_used_slot(s, mdl, p):
     for mi in range(mdl.M):
         if s.Value(mdl.atused[p, mi]):
