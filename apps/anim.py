@@ -148,11 +148,11 @@ def positions_at(segs: dict[str, list[tuple]], t: int) -> tuple[dict, dict]:
 
 
 def _roster_label(members: list[str]) -> str:
-    """ノードラベル末尾の在籍表記（👷アイコン＋人数）。改行は mm_esc で <br/> 化。"""
+    """ノードラベル末尾の在籍表記（🧽アイコン＋人数）。改行は mm_esc で <br/> 化。"""
     n = len(members)
     if n == 0:
         return "（不在）"
-    icon, cap = "👷", 12
+    icon, cap = "🧽", 12
     icons = icon * min(n, cap) + (f"＋{n - cap}" if n > cap else "")
     return f"{icons}\n{n}名"
 

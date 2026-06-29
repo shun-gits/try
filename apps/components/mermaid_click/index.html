@@ -17,20 +17,45 @@
 </head>
 <body>
   <div id="wrap">
-    <div id="graph" class="mermaid"></div>
+    <!-- class="mermaid" は付けない。付けると mermaid の自動スキャン(run/contentLoaded)が
+         描画後の SVG 入り #graph を「図ソース」と誤認して parse し、"Syntax error" 爆弾を
+         注入してしまう。描画は下の mermaid.render で手動実行する。 -->
+    <div id="graph"></div>
     <div id="hint">B 島ノードをクリックすると下の編集パネルが開きます</div>
   </div>
 
   <!-- Streamlit in Snowflake は iframe からの外部 CDN 取得を CSP で遮断するため、
-       mermaid は同梱した UMD バンドル(window.mermaid)をローカルから読み込む。 -->
-  <script src="./mermaid.min.js"></script>
+       mermaid は同梱した UMD バンドル(window.mermaid)をローカルから読み込む。
+       巨大バンドル(約3MB)が未読込/取りこぼしのまま module が先に走ると window.mermaid
+       が undefined になるため、id=mmjs の load 完了を待ってから初期化する。 -->
+  <script id="mmjs" src="./mermaid.min.js?v=123"></script>
   <script type="module">
-    const mermaid = window.mermaid;
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "loose",
-      flowchart: { htmlLabels: true, curve: "basis" },
-    });
+    // 図の領域に原因付きエラーを描く（mermaid 既定の「Syntax error」爆弾だけだと切り分け不能なため）。
+    function showError(title, detail) {
+      const el = document.getElementById("graph");
+      if (el) {
+        el.innerHTML =
+          '<div style="color:#b00;font-size:12px;text-align:left;white-space:pre-wrap;' +
+          'padding:8px;border:1px solid #f0c0c0;background:#fff5f5;border-radius:4px;">' +
+          '<b>' + title + '</b>\n' + (detail || "") + '</div>';
+      }
+      try { setFrameHeight(document.body.scrollHeight + 8); } catch (_) {}
+      console.error("[mermaid_click]", title, detail);
+    }
+
+    // バンドルの load 完了を待って window.mermaid を取得（読込順や巨大ファイルの遅延に強くする）。
+    async function getMermaid() {
+      if (window.mermaid) return window.mermaid;
+      const tag = document.getElementById("mmjs");
+      await new Promise((resolve) => {
+        tag.addEventListener("load", resolve, { once: true });
+        tag.addEventListener("error", resolve, { once: true });
+        // 既に load 済み(イベント取りこぼし)に備えてポーリングでも待つ。
+        const iv = setInterval(() => { if (window.mermaid) { clearInterval(iv); resolve(); } }, 50);
+        setTimeout(() => { clearInterval(iv); resolve(); }, 8000);
+      });
+      return window.mermaid;
+    }
 
     // --- Streamlit コンポーネント双方向プロトコル（streamlit-component-lib 不使用） ---
     function post(type, extra) {
@@ -61,20 +86,90 @@
         .forEach((n) => n.classList.add("node-selected"));
     }
 
+    // mermaid バンドルの取得＋初期化（1 度だけ）。失敗時は理由を画面に出す。
+    let mermaid = null;
+    let readyPromise = null;
+    function ensureMermaid() {
+      if (readyPromise) return readyPromise;
+      readyPromise = (async () => {
+        const mm = await getMermaid();
+        if (!mm || typeof mm.render !== "function") {
+          throw new Error(
+            "mermaid バンドル(mermaid.min.js)を読み込めませんでした。" +
+            "キャッシュ済みの古い/不完全なファイルが原因の可能性があります。" +
+            "ブラウザのスーパーリロード(Chrome: Ctrl+Shift+R / Cmd+Shift+R)を試してください。");
+        }
+        mm.initialize({
+          startOnLoad: false,
+          securityLevel: "loose",
+          flowchart: { htmlLabels: true, curve: "basis" },
+        });
+        mermaid = mm;
+        return mm;
+      })();
+      return readyPromise;
+    }
+
+    // #graph の幅が確定するまで rAF でポーリングする。
+    // Chrome では iframe のレイアウト前に mermaid.render() を呼ぶと dagre が
+    // "Could not find a suitable point for the given distance" を投げるため、
+    // エラーを出してからリトライするより、描画前に幅の確定を待つほうが確実。
+    async function waitForLayout(timeoutMs = 5000) {
+      const el = document.getElementById("graph");
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (el.getBoundingClientRect().width > 0) return;
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+
+    // 万一 waitForLayout をすり抜けた場合の安全網として残す（発生頻度は大幅に減る想定）。
+    async function mermaidRenderWithRetry(id, code) {
+      const delays = [200, 500, 1000];
+      let lastErr;
+      for (let i = 0; i <= delays.length; i++) {
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, delays[i - 1]));
+        }
+        try {
+          return await mermaid.render(id, code);
+        } catch (e) {
+          if (e && e.message && e.message.includes("Could not find a suitable point")) {
+            lastErr = e;
+            continue;
+          }
+          throw e;
+        }
+      }
+      throw lastErr;
+    }
+
     let lastCode = null;
     async function render(code, selNode) {
       const el = document.getElementById("graph");
-      if (code !== lastCode) {
-        lastCode = code;
-        el.removeAttribute("data-processed");
-        el.innerHTML = "";
-        const id = "g" + Math.random().toString(36).slice(2);
-        const { svg, bindFunctions } = await mermaid.render(id, code);
-        el.innerHTML = svg;
-        if (bindFunctions) bindFunctions(el);
+      try {
+        await ensureMermaid();
+        if (code !== lastCode) {
+          lastCode = code;
+          el.removeAttribute("data-processed");
+          el.innerHTML = "";
+          const id = "g" + Math.random().toString(36).slice(2);
+          await waitForLayout();
+          // 先に parse で検証する。render に不正コードを渡すと mermaid が DOM に
+          // "Syntax error" 爆弾を直接注入するため、parse 失敗は手前で握って弾く。
+          await mermaid.parse(code);
+          const { svg, bindFunctions } = await mermaidRenderWithRetry(id, code);
+          el.innerHTML = svg;
+          if (bindFunctions) bindFunctions(el);
+        }
+        if (selNode !== undefined) { selected = selNode; }
+        markSelected(selected);
+      } catch (e) {
+        // 描画に失敗したら次回再試行できるよう lastCode を戻し、原因を可視化する。
+        lastCode = null;
+        showError("mermaid 図の描画に失敗しました", (e && e.message) || String(e));
+        return;
       }
-      if (selNode !== undefined) { selected = selNode; }
-      markSelected(selected);
       // レンダリング後に実高さへ調整
       window.requestAnimationFrame(() =>
         setFrameHeight(document.body.scrollHeight + 8));

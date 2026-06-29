@@ -36,6 +36,7 @@ from route_opt.loader import load_instance  # noqa: E402
 from route_opt.model import FullModel, SolutionRecorder  # noqa: E402
 from route_opt.report import plot_gantt, trips_df, write_csv  # noqa: E402
 from route_opt.rolling import solve_rolling  # noqa: E402
+from route_opt.solver_cfg import solver_params_for  # noqa: E402
 
 INSTANCES = pathlib.Path("instances")
 OUTDIR = pathlib.Path("out")
@@ -517,7 +518,7 @@ def tab_passengers():
         st.markdown("**初期配置マップ（ルート構造のサイクル図上に表示）**")
         st.caption(
             "Sites タブと同じ A 待機 → B 島 → A 復帰 → C → D → C → A 待機 のサイクル図上に、"
-            "計画開始時点で各拠点に居る人数を 👷 アイコンと数値で表示します（右の表を編集するとリアルタイム更新）。"
+            "計画開始時点で各拠点に居る人数を 🧽 アイコンと数値で表示します（右の表を編集するとリアルタイム更新）。"
             "C は中継点のため誰も滞在しません。initial_state に未設定の乗客は A 待機として表示します。"
         )
         map_slot = st.container()  # マップは編集後の doc を使うため右の編集後に描画
@@ -593,39 +594,19 @@ def tab_passengers():
             mermaid_click(_initial_state_mermaid(doc), key="init_state_graph")
 
 
-def tab_solver():
-    doc = get_doc()
-    st.subheader("Solver params")
-    st.caption(
-        "MIP ソルバーの挙動を制御するパラメータです。"
-        "値を大きくするとモデルが複雑になり求解時間が増えます。小さくすると近似解になる可能性があります。"
-    )
-    sp = doc.setdefault("solver", {})
-    c = st.columns(3)
-    sp["max_visits_per_passenger"] = int(c[0].number_input("max_visits_per_passenger", 1, 60,
-                                         int(sp.get("max_visits_per_passenger", 4)),
-                                         help="1 人の乗客が計画期間中に B 島を訪問できる最大回数。"
-                                              "大きいほど柔軟なスケジュールになりますが変数が増えます。"))
-    sp["trips_per_site"] = int(c[1].number_input("trips_per_site", 1, 300,
-                               int(sp.get("trips_per_site", 8)),
-                               help="各 B 島サイトへのトリップ数の上界。"
-                                    "計画期間÷平均滞在日数 程度を目安にしてください。"))
-    sp["trips_cd"] = int(c[2].number_input("trips_cd", 1, 300, int(sp.get("trips_cd", 8)),
-                                           help="CD-arm（A→C→D→C→A）のトリップ数の上界。"
-                                                "CD-arm を使わない場合は無視されます。"))
-    c2 = st.columns(2)
-    sp["max_seconds"] = float(c2[0].number_input("max_seconds", 1.0, 600.0,
-                              float(sp.get("max_seconds", 30.0)),
-                              help="ソルバーの最大実行時間（秒）。時間内に最適解が見つからない場合は暫定解を返します。"))
-    cm = c2[1].text_input("commit_hours（空欄=単一ウィンドウ）",
-                          "" if sp.get("commit_hours") is None else str(sp["commit_hours"]),
-                          help="ローリングホライズン使用時のコミット幅（時間）。"
-                               "空欄にすると計画期間全体を一括で解く単一ウィンドウモードになります。")
-    sp["commit_hours"] = int(cm) if cm.strip() else None
-
-
 def _validated_instance():
     return gui_io.instance_from_doc(get_doc())
+
+
+def _instance_for_solve():
+    """ソルバー実行用 Instance を返す。
+
+    solver パラメータは configs/solver_config.yaml と理論値から自動設定する。
+    利用者が編集した doc の solver フィールドは無視される。
+    """
+    inst = _validated_instance()
+    sp = solver_params_for(inst)
+    return inst.model_copy(update={"solver": sp})
 
 
 def tab_save():
@@ -724,105 +705,45 @@ def _show_flow_schedule(mdl, sol) -> None:
 
 def tab_run():
     st.subheader("Run solver")
-    st.caption(
-        "現在の設定でソルバーを実行します。"
-        "**Single window**: 計画期間全体を一括で最適化します（小規模向け）。"
-        "**Rolling horizon**: 期間をウィンドウで区切って逐次最適化します（大規模・長期向け）。"
-    )
+    st.caption("現在の設定でソルバーを実行します（Flow エンジン）。")
     try:
-        inst = _validated_instance()
+        inst = _instance_for_solve()
     except Exception as e:  # noqa: BLE001
         st.error("先に検証を通してください:")
         st.code(str(e))
         return
 
-    mode = st.radio("モード", ["Single window", "Rolling horizon"], horizontal=True,
-                    help="Single window: 全期間を一括求解。Rolling horizon: ウィンドウを滑らせて逐次求解。")
-    if mode == "Single window":
-        engine = st.radio(
-            "エンジン", ["Flow（ダイヤグリッド・長期向け）", "FullModel（連続時間・小規模）"],
-            horizontal=True,
-            help="Flow: 固定ダイヤ前提の時間展開フロー。長 horizon を単発で解け個体を復元。"
-                 "FullModel: 連続時間モデル。小規模向け（長期は UNKNOWN/INFEASIBLE になりやすい）。")
-        if engine.startswith("Flow"):
-            if st.button("Solve (single, flow)"):
-                try:
-                    mdl = FlowModel(inst)
-                except FlowUnsupported as e:
-                    st.error("Flow エンジンは未対応の構成です:")
-                    st.code(str(e))
-                    st.info("固定ダイヤ（Fleet — owned の各車両 a_c_departures）を設定し、"
-                            "各乗客の allowed_sites を単一 B サイトにしてください。")
-                else:
-                    rec = SolutionRecorder()
-                    with st.spinner("solving (flow)..."):
-                        sol = mdl.solve(callback=rec)
-                    st.code(sol.summary())
-                    _show_improvement(rec.rows)
-                    if sol.ok:
-                        _show_flow_schedule(mdl, sol)
-                        # 移動可視化タブ用に「乗客別タイムライン」を保存する。
-                        st.session_state["anim"] = {
-                            "snap": anim_mod.route_snapshot(inst),
-                            "segs": anim_mod.intervals_from_flow(inst, sol.decode()),
-                            "source": "Single window / Flow",
-                        }
-                        st.success("→「移動可視化」タブで時刻スライダーによるアニメーションを確認できます。")
+    sp = inst.solver
+    st.info(
+        f"ソルバーパラメータ（configs/solver_config.yaml + 自動計算）: "
+        f"M={sp.max_visits_per_passenger} / J={sp.trips_per_site} / "
+        f"JCD={sp.trips_cd} / max_seconds={sp.max_seconds}s"
+        + (f" / commit_hours={sp.commit_hours}h" if sp.commit_hours else "")
+    )
+
+    if st.button("Solve (single, flow)"):
+        try:
+            mdl = FlowModel(inst)
+        except FlowUnsupported as e:
+            st.error("Flow エンジンは未対応の構成です:")
+            st.code(str(e))
+            st.info("固定ダイヤ（Fleet — owned の各車両 a_c_departures）を設定し、"
+                    "各乗客の allowed_sites を単一 B サイトにしてください。")
         else:
-            if st.button("Solve (single)"):
-                rec = SolutionRecorder()
-                with st.spinner("solving..."):
-                    sol = FullModel(inst).solve(callback=rec)
-                st.code(sol.summary())
-                _show_improvement(rec.rows)
-    else:
-        c = st.columns(2)
-        wd = c[0].number_input("window_days (lookahead)", 1.0, 30.0, 6.0,
-                               help="各ウィンドウで先読みする日数。大きいほど精度は上がりますが求解時間が増えます。")
-        sd = c[1].number_input("step_days (commit)", 1.0, 30.0, 5.0,
-                               help="各ウィンドウで確定（コミット）する日数。window_days 以下にしてください。")
-        if st.button("Solve (rolling)"):
-            with st.spinner("rolling solve..."):
-                r = solve_rolling(inst, window_days=float(wd), step_days=float(sd),
-                                  verbose=False)
-            if not r.ok:
-                st.error(f"FAILED: {r.message}")
-                return
-            st.success(f"OK  total_cost={r.total_cost:.0f}  "
-                       f"windows={len(r.windows)}  CD_trips={sum(w['cd_trips'] for w in r.windows)}")
-            # 移動可視化タブ用に「乗客別タイムライン」を保存する。
-            st.session_state["anim"] = {
-                "snap": anim_mod.route_snapshot(inst),
-                "segs": anim_mod.intervals_from_rolling(inst, r),
-                "source": "Rolling horizon",
-            }
-            st.info("→「移動可視化」タブで時刻スライダーによるアニメーションを確認できます。")
-            # 改善履歴（improve）はネストしたリストなので表からは除いて別途グラフ化する。
-            st.dataframe(pd.DataFrame([{k: v for k, v in w.items() if k != "improve"}
-                                       for w in r.windows]), width="stretch")
-            st.subheader("解の改善グラフ（ウィンドウごと）")
-            st.caption(
-                "Rolling は各ウィンドウを個別に求解します。下のウィンドウを開くと、"
-                "そのウィンドウ内でソルバーがより安い解へ改善していった過程（経過秒はウィンドウ"
-                "求解開始からの相対）を確認できます。total_cost は各ウィンドウ採用解の合計です。"
-            )
-            for w in r.windows:
-                label = (f"win @{w['start_h']}h  ({w['status']}, cost={w['cost']:.0f}, "
-                         f"改善{len(w['improve'])}回, wall={w['wall']}s)")
-                with st.expander(label):
-                    _show_improvement(w["improve"], header=False)
-            OUTDIR.mkdir(exist_ok=True)
-            paths = write_csv(r, inst, OUTDIR)
-            png = plot_gantt(r, inst, OUTDIR / "schedule_gantt.png")
-            st.image(str(png), caption="Schedule Gantt")
-            st.dataframe(trips_df(r).head(50), width="stretch")
-            d = st.columns(2)
-            d[0].download_button("trips.csv", paths["trips"].read_bytes(),
-                                 file_name="schedule_trips.csv",
-                                 help="各トリップの詳細（出発・到着時刻、乗客など）を含む CSV。")
-            d[1].download_button("stays.csv", paths["stays"].read_bytes(),
-                                 file_name="schedule_stays.csv",
-                                 help="各乗客のサイト滞在期間を含む CSV。")
+            rec = SolutionRecorder()
+            with st.spinner("solving (flow)..."):
+                sol = mdl.solve(callback=rec)
+            st.code(sol.summary())
+            _show_improvement(rec.rows)
+            if sol.ok:
+                _show_flow_schedule(mdl, sol)
+                # 移動可視化タブ用に「乗客別タイムライン」を保存する。
+                st.session_state["anim"] = {
+                    "snap": anim_mod.route_snapshot(inst),
+                    "segs": anim_mod.intervals_from_flow(inst, sol.decode()),
+                    "source": "Single window / Flow",
+                }
+                st.success("→「移動可視化」タブで時刻スライダーによるアニメーションを確認できます。")
 
 
 # --------------------------------------------------------------------------
@@ -831,215 +752,6 @@ _COL_A = "#4C72B0"  # A 本拠点
 _COL_B = "#55A868"  # B 有人サイト
 _COL_C = "#C44E52"  # C 中継点
 _COL_D = "#DD8452"  # D 一時サイト
-
-
-def _route_figure(doc: dict) -> plt.Figure:
-    """固定ルート A→B→A→C→D→C→A を巡回順序つきの 1 枚に統合して返す。
-
-    1 本の背骨（spine）に巡回順序 ① → ② → … と各区間の移動時間を載せ、
-    B ステップは「複数島のいずれか 1 つを選ぶ」ことを分岐（fan）で示す。
-    各島には往復時間と滞在レンジ、D には滞在レンジを併記する。
-    """
-    sites = doc.get("staffed_sites", {})
-    cd = doc.get("cd_arm")
-    tmp = doc.get("temporary_site")
-
-    # --- 固定順序で背骨ノードと区間を組み立てる ---
-    # nodes: (ラベル, 色, 補足文), legs: 区間ラベル（len == len(nodes) - 1）
-    nodes: list[tuple[str, str, str]] = [("A", _COL_A, "本拠点")]
-    legs: list[str] = []
-    b_idx: int | None = None  # 背骨上の B スロットの位置
-
-    if sites:
-        b_idx = len(nodes)
-        nodes.append(("B", _COL_B, "いずれか1島"))
-        nodes.append(("A", _COL_A, "立寄"))
-        legs += ["往路", "復路"]
-
-    if cd is not None:
-        nodes.append(("C", _COL_C, "中継点"))
-        legs.append(f"{cd.get('a_c_hours', '?')}h")
-        if tmp is not None:
-            hrs = gui_io.d_stay_hours(tmp.get("d_stay_table", {}))
-            d_sub = f"滞在 {min(hrs)}〜{max(hrs)}h" if hrs else "一時サイト"
-            nodes.append(("D", _COL_D, d_sub))
-            nodes.append(("C", _COL_C, "中継点"))
-            legs += [f"{cd.get('c_d_hours', '?')}h", f"{cd.get('d_c_hours', '?')}h"]
-        legs.append(f"{cd.get('c_a_hours', '?')}h")
-        nodes.append(("A", _COL_A, "帰還"))
-
-    # --- 島分岐（fan）の位置決め ---
-    site_names = list(sites.keys())
-    n_isl = len(site_names)
-    dx = 1.7
-    xs = [i * dx for i in range(len(nodes))]
-    isl_y0, isl_dy = 1.4, 1.05
-    top = isl_y0 + max(n_isl - 1, 0) * isl_dy + 0.7 if n_isl else 1.1
-
-    fig, ax = plt.subplots(figsize=(max(9, len(nodes) * dx + 2.5),
-                                    max(3.6, 2.4 + n_isl * 0.95)))
-    ax.set_facecolor("#F8F8F8")
-    fig.patch.set_facecolor("#F8F8F8")
-    ax.set_xlim(-0.8, xs[-1] + 0.8)
-    ax.set_ylim(-1.05, top)
-    ax.axis("off")
-
-    # 背骨：区間矢印 + ステップ番号 + 区間ラベル
-    for i, leg in enumerate(legs):
-        x0, x1 = xs[i], xs[i + 1]
-        ax.annotate("", xy=(x1 - 0.32, 0), xytext=(x0 + 0.32, 0),
-                    arrowprops={"arrowstyle": "-|>", "color": "#555", "lw": 2.2},
-                    zorder=2)
-        xm = (x0 + x1) / 2
-        ax.scatter([xm], [0.42], s=340, color="white", edgecolors="#555",
-                   linewidths=1.6, zorder=4)
-        ax.text(xm, 0.42, f"{i + 1}", ha="center", va="center", fontsize=9.5,
-                fontweight="bold", color="#333", zorder=5)
-        ax.text(xm, -0.16, leg, ha="center", va="top", fontsize=8, color="#222",
-                zorder=5)
-
-    # 背骨：拠点ノード
-    for x, (label, color, sub) in zip(xs, nodes):
-        ax.scatter([x], [0], s=1700, color=color, edgecolors="white",
-                   linewidths=1.6, zorder=3)
-        ax.text(x, 0, label, ha="center", va="center", color="white",
-                fontsize=12, fontweight="bold", zorder=4)
-        if sub:
-            ax.text(x, -0.46, sub, ha="center", va="top", fontsize=8,
-                    color="#333", zorder=4)
-
-    # B スロットから各島への分岐（「いずれか 1 島を選ぶ」）
-    if b_idx is not None and n_isl:
-        bx = xs[b_idx]
-        trunk_top = isl_y0 + (n_isl - 1) * isl_dy
-        ax.plot([bx, bx], [0.34, trunk_top], ls=":", color=_COL_B, lw=1.4, zorder=1)
-        isl_x = bx + 0.55
-        for i, name in enumerate(site_names):
-            y = isl_y0 + i * isl_dy
-            s = sites[name]
-            seg = s.get("segments", {})
-            inb = seg.get("inbound_hours", "?")
-            out = seg.get("outbound_hours", "?")
-            stay = s.get("stay", {})
-            lo = stay.get("min_hours", 0)
-            hi = stay.get("max_hours", lo)
-            ax.plot([bx, isl_x - 0.2], [y, y], ls=":", color=_COL_B, lw=1.4, zorder=1)
-            ax.scatter([isl_x], [y], s=900, color=_COL_B, edgecolors="white",
-                       linewidths=1.4, zorder=3)
-            ax.text(isl_x, y, name, ha="center", va="center", color="white",
-                    fontsize=9, fontweight="bold", zorder=4)
-            ax.text(isl_x + 0.45, y, f"往 {inb}h ／ 復 {out}h ／ 滞在 {lo}〜{hi}h",
-                    ha="left", va="center", fontsize=8, color="#333", zorder=4)
-
-    # 凡例
-    legend_items = [
-        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=_COL_A,
-                   markersize=12, label="A 本拠点"),
-        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=_COL_B,
-                   markersize=12, label="B 有人サイト（いずれか1島）"),
-    ]
-    if cd is not None:
-        legend_items.append(plt.Line2D([0], [0], marker="o", color="w",
-                                       markerfacecolor=_COL_C, markersize=12, label="C 中継点"))
-    if tmp is not None:
-        legend_items.append(plt.Line2D([0], [0], marker="o", color="w",
-                                       markerfacecolor=_COL_D, markersize=12, label="D 一時サイト"))
-    ax.legend(handles=legend_items, loc="upper right", fontsize=8.5, framealpha=0.85)
-    ax.set_title("固定ルート ① → ② → … の順に巡回（数値は片道移動時間）",
-                 fontsize=12, pad=10)
-    fig.tight_layout()
-    return fig
-
-
-def _stay_figure(doc: dict) -> plt.Figure | None:
-    """滞在時間レンジの横棒チャートを返す。サイトがなければ None。"""
-    sites = doc.get("staffed_sites", {})
-    tmp = doc.get("temporary_site")
-
-    labels, mins, ranges = [], [], []
-    for name, s in sites.items():
-        stay = s.get("stay", {})
-        lo = stay.get("min_hours", 0)
-        hi = stay.get("max_hours", lo)
-        labels.append(name)
-        mins.append(lo)
-        ranges.append(max(hi - lo, 0))
-
-    if tmp is not None:
-        hrs = gui_io.d_stay_hours(tmp.get("d_stay_table", {}))
-        if hrs:
-            max_hours = max(hrs)
-            labels.append("D（一時サイト）")
-            mins.append(0)
-            ranges.append(max_hours)
-
-    if not labels:
-        return None
-
-    fig, ax = plt.subplots(figsize=(7, max(2.5, len(labels) * 0.7 + 1.0)))
-    y = range(len(labels))
-    ax.barh(list(y), mins, color="none")  # invisible offset
-    ax.barh(list(y), ranges, left=mins, color="#4C72B0", alpha=0.75, label="滞在可能レンジ")
-    ax.scatter(mins, list(y), color="#2b5ea7", zorder=5, s=60, label="min")
-    max_vals = [m + r for m, r in zip(mins, ranges)]
-    ax.scatter(max_vals, list(y), color="#C44E52", marker="|", zorder=5, s=120, label="max")
-
-    for i, (lo, hi) in enumerate(zip(mins, max_vals)):
-        ax.text(lo, i, f" {lo}h", va="center", ha="left", fontsize=8, color="#2b5ea7")
-        ax.text(hi, i, f" {hi}h", va="center", ha="left", fontsize=8, color="#C44E52")
-
-    ax.set_yticks(list(y))
-    ax.set_yticklabels(labels)
-    ax.set_xlabel("時間 (hours)")
-    ax.set_title("滞在時間レンジ（min ～ max）", fontsize=11)
-    ax.legend(loc="lower right", fontsize=8)
-    fig.tight_layout()
-    return fig
-
-
-def _staffing_table(doc: dict) -> pd.DataFrame | None:
-    """人員充足制約テーブルを DataFrame で返す。"""
-    sites = doc.get("staffed_sites", {})
-    if not sites:
-        return None
-
-    all_cats: list[str] = sorted({
-        cat
-        for s in sites.values()
-        for cat in s.get("category_requirements", {}).keys()
-    })
-
-    rows = []
-    for name, s in sites.items():
-        row: dict = {"サイト": name,
-                     "occupancy_min": s.get("occupancy_min", 0),
-                     "交代必須": "✓" if s.get("replacement_required", False) else ""}
-        for cat in all_cats:
-            row[cat] = s.get("category_requirements", {}).get(cat, 0)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def _category_figure(doc: dict) -> plt.Figure | None:
-    """乗客カテゴリ分布の棒グラフを返す。乗客がいなければ None。"""
-    passengers = doc.get("passengers", [])
-    if not passengers:
-        return None
-
-    from collections import Counter
-    counts = Counter(p.get("category", "?") for p in passengers)
-    cats = sorted(counts.keys())
-    vals = [counts[c] for c in cats]
-
-    fig, ax = plt.subplots(figsize=(max(4, len(cats) * 0.9 + 1.5), 3.5))
-    bars = ax.bar(cats, vals, color="#55A868", alpha=0.85, width=0.6)
-    ax.bar_label(bars, padding=3, fontsize=10)
-    ax.set_xlabel("カテゴリ")
-    ax.set_ylabel("人数")
-    ax.set_title("乗客カテゴリ分布", fontsize=11)
-    ax.set_ylim(0, max(vals) * 1.25)
-    fig.tight_layout()
-    return fig
 
 
 def _initial_state_mermaid(doc: dict) -> str:
@@ -1068,7 +780,7 @@ def _initial_state_mermaid(doc: dict) -> str:
     for loc in members:
         members[loc].sort()
 
-    icon, cap = "👷", 12  # 在籍人数を表す作業員アイコンと、並べる上限数
+    icon, cap = "🧽", 12  # 在籍人数を表すアイコンと、並べる上限数
 
     def _roster(loc: str) -> str:
         """ノードラベル末尾に付ける在籍人数表記（アイコン＋人数）。改行は _mm_esc で <br/> 化。"""
@@ -1201,7 +913,7 @@ def tab_animation():
     st.caption(
         "Run タブで解いた結果をもとに、各島・拠点を人が移動し fleet が載せていく様子を、"
         "ルート構造のサイクル図上で時刻を進めながら確認できます。"
-        "スライダーを動かすと、各拠点の在籍人数（👷）と、区間を移動中の人数"
+        "スライダーを動かすと、各拠点の在籍人数（🧽）と、区間を移動中の人数"
         "（🚶＝徒歩、🚐＝fleet 便）がリアルタイムに更新されます。"
     )
 
@@ -1315,69 +1027,13 @@ def tab_animation():
     st.altair_chart(_gantt_chart(snap, segs), use_container_width=True)
 
 
-def tab_visualize():
-    doc = get_doc()
-    st.subheader("制約可視化")
-    st.caption("現在の設定から経路構造・時間制約・人員制約を図示します。Sites タブや Passengers タブを変更するとリアルタイムで更新されます。")
-
-    sites = doc.get("staffed_sites", {})
-
-    # 1. ルート経路図（固定順序つき）
-    st.markdown("#### ルート経路図（巡回順序つき）")
-    if not sites and doc.get("cd_arm") is None:
-        st.info("サイトが未定義です。Sites タブで B 島を追加してください。")
-    else:
-        st.pyplot(_route_figure(doc))
-        st.caption(
-            "経路は **A（本拠点）→ B（複数島のいずれか1島）→ A → C → D → C → A（帰還）** に固定されています。"
-            "矢印上の ① → ② → … が巡回順序、数値は各区間の片道移動時間です。"
-            "B では複数の島から 1 つを選びます（点線の分岐）。"
-            "CD アームは必ず C を経由して D に到達します（A→D 直行は不可）。"
-        )
-
-    st.divider()
-
-    # 2. 滞在時間レンジ
-    st.markdown("#### 滞在時間レンジ")
-    stay_fig = _stay_figure(doc)
-    if stay_fig is None:
-        st.info("サイトが未定義のため表示できません。")
-    else:
-        st.pyplot(stay_fig)
-
-    st.divider()
-
-    # 3. 人員充足制約テーブル
-    st.markdown("#### 人員充足制約")
-    df = _staffing_table(doc)
-    if df is None:
-        st.info("サイトが未定義のため表示できません。")
-    else:
-        st.dataframe(df, hide_index=True, use_container_width=True)
-        st.caption("各列はカテゴリ別の最低必要人数。occupancy_min はサイト全体の最低駐在人数。")
-
-    st.divider()
-
-    # 4. 乗客カテゴリ分布
-    st.markdown("#### 乗客カテゴリ分布")
-    cat_fig = _category_figure(doc)
-    if cat_fig is None:
-        st.info("乗客が未定義のため表示できません。Passengers タブで追加してください。")
-    else:
-        st.pyplot(cat_fig)
-        rules = doc.get("passenger_rules", {})
-        if rules:
-            st.caption(f"赴任制約あり乗客: {len(rules)} 名（Passengers タブの Passenger rules を参照）")
-
-
 # --------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Instance Editor", layout="wide")
     st.title("Fixed-Route Rotation — Instance Editor")
     get_doc()  # ensure init
     tabs = st.tabs(["Load/New", "General", "Vehicles & Fleet", "Sites",
-                    "Passengers", "Solver", "Validate & Save", "Run", "制約可視化",
-                    "移動可視化"])
+                    "Passengers", "Validate & Save", "Run", "移動可視化"])
     with tabs[0]:
         tab_load()
     with tabs[1]:
@@ -1389,14 +1045,10 @@ def main():
     with tabs[4]:
         tab_passengers()
     with tabs[5]:
-        tab_solver()
-    with tabs[6]:
         tab_save()
-    with tabs[7]:
+    with tabs[6]:
         tab_run()
-    with tabs[8]:
-        tab_visualize()
-    with tabs[9]:
+    with tabs[7]:
         tab_animation()
 
 

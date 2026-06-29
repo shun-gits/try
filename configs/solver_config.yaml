@@ -1,0 +1,20 @@
+# Solver configuration — managed by system administrators.
+#
+# max_visits_per_passenger / trips_per_site / trips_cd
+#   null にすると instance_editor がインスタンスから理論上限値を自動計算します。
+#   手動で上書きしたい場合は整数を指定してください（小さいほど高速, 大きいほど
+#   解の見落としが減りますが変数数が増えます）。
+#   適切な値の目安は  streamlit run apps/solver_tuner.py  で確認できます。
+#
+# max_seconds
+#   ソルバーの最大実行時間（秒）。時間内に最適解が見つからない場合は暫定解を返します。
+#
+# commit_hours
+#   ローリングホライズン使用時のコミット幅（時間）。
+#   null にすると計画期間全体を一括で解く単一ウィンドウモードになります。
+
+max_visits_per_passenger: null
+trips_per_site: null
+trips_cd: null
+max_seconds: 30.0
+commit_hours: null
