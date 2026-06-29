@@ -67,6 +67,20 @@
       post("streamlit:setComponentValue", { value: v, dataType: "json" });
     }
 
+    // mermaid.min.js は通常スクリプトなので <script type="module"> より先に実行済み。
+    // ここで即座に startOnLoad:false をセットして、mermaid の自動スキャン(run/DOMContentLoaded)が
+    // 走る前にキャンセルする。これをしないと render() が呼ばれる前にスキャンが起動し
+    // "Syntax error" を注入してしまう。
+    let mermaid = null;
+    if (window.mermaid && typeof window.mermaid.initialize === "function") {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "loose",
+        flowchart: { htmlLabels: true, curve: "basis" },
+      });
+      mermaid = window.mermaid;
+    }
+
     // mermaid の `click NODE call __nodeClicked()` から nodeId を受け取る
     let selected = null;
     window.__nodeClicked = (nodeId) => {
@@ -87,11 +101,12 @@
     }
 
     // mermaid バンドルの取得＋初期化（1 度だけ）。失敗時は理由を画面に出す。
-    let mermaid = null;
+    // mermaid 変数は上の即時初期化ブロックで宣言済み。
     let readyPromise = null;
     function ensureMermaid() {
       if (readyPromise) return readyPromise;
       readyPromise = (async () => {
+        if (mermaid) return mermaid; // 既にスクリプト起動時に初期化済み
         const mm = await getMermaid();
         if (!mm || typeof mm.render !== "function") {
           throw new Error(
