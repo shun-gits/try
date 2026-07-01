@@ -17,6 +17,22 @@ from __future__ import annotations
 from route_opt.report import build_stays
 
 
+_DEFAULT_LABELS: dict[str, str] = {
+    "await": "A 待機",
+    "aout": "A 復帰",
+    "fleet": "fleet 便",
+    "walk": "徒歩移動",
+    "b_stay": "島 滞在",
+    "d_stay": "D 滞在",
+    "person_suffix": "名",
+}
+
+
+def _get_labels(snap: dict) -> dict[str, str]:
+    """snap から labels を取り出す。未設定キーはデフォルト値で補完する。"""
+    return {**_DEFAULT_LABELS, **snap.get("labels", {})}
+
+
 def mm_esc(text: str) -> str:
     """mermaid ノードラベル用エスケープ（" は崩れるので ' に、改行は <br/>）。"""
     return str(text).replace('"', "'").replace("\n", "<br/>")
@@ -24,7 +40,7 @@ def mm_esc(text: str) -> str:
 
 def is_node_token(tok: str) -> bool:
     """place_token がノード（拠点）か（エッジ＝移動中でないか）。"""
-    return tok in ("Await", "D") or (tok.startswith("B") and tok[1:].isdigit())
+    return tok in ("Await", "Aout", "D") or (tok.startswith("B") and tok[1:].isdigit())
 
 
 def route_snapshot(inst) -> dict:
@@ -42,7 +58,17 @@ def route_snapshot(inst) -> dict:
     if cd is not None:
         cdd = {"a_c": cd.a_c_hours, "c_d": cd.c_d_hours,
                "d_c": cd.d_c_hours, "c_a": cd.c_a_hours}
-    return {"sites": sites, "cd": cdd,
+    d = inst.display
+    labels = {
+        "await": d.await_label,
+        "aout": d.aout_label,
+        "fleet": d.fleet_label,
+        "walk": d.walk_label,
+        "b_stay": d.b_stay_label,
+        "d_stay": d.d_stay_label,
+        "person_suffix": d.person_suffix,
+    }
+    return {"sites": sites, "cd": cdd, "labels": labels,
             "start": inst.planning_horizon.start.isoformat(),
             "H": inst.planning_horizon.hours}
 
@@ -54,6 +80,7 @@ def intervals_from_flow(inst, timeline: dict) -> dict[str, list[tuple]]:
     from_d = d_c + c_a
     site_index = {name: i for i, name in enumerate(inst.staffed_sites)}
 
+    H = inst.planning_horizon.hours
     segs: dict[str, list[tuple]] = {}
     for pid, acts in timeline.items():
         ivs: list[tuple] = []
@@ -78,7 +105,15 @@ def intervals_from_flow(inst, timeline: dict) -> dict[str, list[tuple]]:
                 ivs.append((leaveD, returnA - c_a, "DtoC"))        # D→C（徒歩）
                 ivs.append((returnA - c_a, returnA, "CtoA"))       # C→A（便）
         ivs.sort()
-        segs[pid] = ivs
+        # A復帰トークン: from_Bi 終了〜次区間開始（またはhorizon末尾）を Aout で埋める
+        enhanced: list[tuple] = []
+        for idx, (t0, t1, tok) in enumerate(ivs):
+            enhanced.append((t0, t1, tok))
+            if tok.startswith("from_B"):
+                next_t0 = ivs[idx + 1][0] if idx + 1 < len(ivs) else H
+                if next_t0 > t1:
+                    enhanced.append((t1, next_t0, "Aout"))
+        segs[pid] = enhanced
     return segs
 
 
@@ -121,8 +156,18 @@ def intervals_from_rolling(inst, result) -> dict[str, list[tuple]]:
                 segs.setdefault(p, []).append((depD, depD + d_c, "DtoC"))
                 segs.setdefault(p, []).append((t["return_A"] - c_a, t["return_A"], "CtoA"))
 
+    H = inst.planning_horizon.hours
     for pid in segs:
         segs[pid].sort()
+        ivs = segs[pid]
+        enhanced: list[tuple] = []
+        for idx, (t0, t1, tok) in enumerate(ivs):
+            enhanced.append((t0, t1, tok))
+            if tok.startswith("from_B"):
+                next_t0 = ivs[idx + 1][0] if idx + 1 < len(ivs) else H
+                if next_t0 > t1:
+                    enhanced.append((t1, next_t0, "Aout"))
+        segs[pid] = enhanced
     return segs
 
 
@@ -147,14 +192,14 @@ def positions_at(segs: dict[str, list[tuple]], t: int) -> tuple[dict, dict]:
     return node_members, edge_members
 
 
-def _roster_label(members: list[str]) -> str:
+def _roster_label(members: list[str], person_suffix: str = "名") -> str:
     """ノードラベル末尾の在籍表記（🧽アイコン＋人数）。改行は mm_esc で <br/> 化。"""
     n = len(members)
     if n == 0:
         return "（不在）"
     icon, cap = "🧽", 12
     icons = icon * min(n, cap) + (f"＋{n - cap}" if n > cap else "")
-    return f"{icons}\n{n}名"
+    return f"{icons}\n{n}{person_suffix}"
 
 
 def anim_mermaid(snap: dict, node_members: dict, edge_members: dict) -> str:
@@ -173,15 +218,18 @@ def anim_mermaid(snap: dict, node_members: dict, edge_members: dict) -> str:
         n = len(edge_members.get(tok, []))
         return f" 🚐{n}" if n else ""
 
+    lbl = _get_labels(snap)
+    suffix = lbl["person_suffix"]
     lines = ["graph TD"]
     lines.append(
-        f'  Await(("{mm_esc("A 待機" + chr(10) + _roster_label(node_members.get("Await", [])))}")):::anode')
-    lines.append('  Aout(("A 復帰")):::anode')
+        f'  Await(("{mm_esc(lbl["await"] + chr(10) + _roster_label(node_members.get("Await", []), suffix))}")):::anode')
+    lines.append(
+        f'  Aout(("{mm_esc(lbl["aout"] + chr(10) + _roster_label(node_members.get("Aout", []), suffix))}")):::anode')
 
     if sites:
         for i, s in enumerate(sites):
             nid = f"B{i}"
-            label = mm_esc(f"{s['name']}\n{_roster_label(node_members.get(nid, []))}")
+            label = mm_esc(f"{s['name']}\n{_roster_label(node_members.get(nid, []), suffix)}")
             lines.append(f'  {nid}["{label}"]:::bnode')
             lines.append(f"  Await -->|往 {s['inb']}h{walk(f'to_B{i}')}| {nid}")
             lines.append(f"  {nid} -->|復 {s['out']}h{walk(f'from_B{i}')}| Aout")
@@ -193,7 +241,7 @@ def anim_mermaid(snap: dict, node_members: dict, edge_members: dict) -> str:
         lines.append('  Cwait(("C 往")):::cnode')
         lines.append('  Cout(("C 復")):::cnode')
         lines.append(
-            f'  D["{mm_esc("D" + chr(10) + _roster_label(node_members.get("D", [])))}"]:::dnode')
+            f'  D["{mm_esc("D" + chr(10) + _roster_label(node_members.get("D", []), suffix))}"]:::dnode')
         lines.append(f"  Aout -->|A→C {cd['a_c']}h{ride('AtoC')}| Cwait")
         lines.append(f"  Cwait -->|C→D {cd['c_d']}h{walk('CtoD')}| D")
         lines.append(f"  D -->|D→C {cd['d_c']}h{walk('DtoC')}| Cout")
@@ -217,25 +265,29 @@ def occupancy_series(snap: dict, node_members: dict) -> list[tuple[str, int, str
         series.append((s["name"], len(node_members.get(f"B{i}", [])), "B"))
     if snap["cd"] is not None:
         series.append(("D", len(node_members.get("D", [])), "D"))
-    series.append(("A 待機", len(node_members.get("Await", [])), "A"))
+    lbl = _get_labels(snap)
+    series.append((lbl["aout"], len(node_members.get("Aout", [])), "A_RET"))
+    series.append((lbl["await"], len(node_members.get("Await", [])), "A"))
     return series
 
 
-def token_category(tok: str) -> str:
+def token_category(tok: str, labels: dict[str, str] | None = None) -> str:
     """place_token を色分け用カテゴリへ畳む（ガント / 凡例で状態をまとめて見せる）。
 
-    返す値: "A 待機" / "島 滞在" / "D 滞在" / "fleet 便" / "徒歩移動"。
-    便（🚐）は AtoC / CtoA、それ以外の移動レグ（to_B/from_B/CtoD/DtoC）は徒歩扱い。
+    labels が渡されれば snap のラベル設定を反映する。省略時はデフォルト値を使う。
     """
+    lbl = {**_DEFAULT_LABELS, **(labels or {})}
     if tok == "Await":
-        return "A 待機"
+        return lbl["await"]
+    if tok == "Aout":
+        return lbl["aout"]
     if tok == "D":
-        return "D 滞在"
+        return lbl["d_stay"]
     if tok.startswith("B") and tok[1:].isdigit():
-        return "島 滞在"
+        return lbl["b_stay"]
     if tok in ("AtoC", "CtoA"):
-        return "fleet 便"
-    return "徒歩移動"
+        return lbl["fleet"]
+    return lbl["walk"]
 
 
 def _token_at(ivs: list[tuple], t: int) -> str:
@@ -257,6 +309,7 @@ def gantt_rows(snap: dict, segs: dict[str, list[tuple]]) -> list[dict]:
     各行: {"passenger", "start_h", "end_h", "place", "category"}。
     place は人間可読な現在地（place_label）、category は色分け用（token_category）。
     """
+    lbl = _get_labels(snap)
     H = max(int(snap["H"]), 1)
     rows: list[dict] = []
     for pid in sorted(segs):
@@ -264,7 +317,7 @@ def gantt_rows(snap: dict, segs: dict[str, list[tuple]]) -> list[dict]:
 
         def _flush(start: int, end: int, tok: str) -> None:
             rows.append({"passenger": pid, "start_h": start, "end_h": end,
-                         "place": place_label(snap, tok), "category": token_category(tok)})
+                         "place": place_label(snap, tok), "category": token_category(tok, lbl)})
 
         run_start, run_tok = 0, _token_at(ivs, 0)
         for t in range(1, H):
@@ -278,11 +331,14 @@ def gantt_rows(snap: dict, segs: dict[str, list[tuple]]) -> list[dict]:
 
 def place_label(snap: dict, tok: str) -> str:
     """place_token を人間可読な現在地表記に変換する（状態テーブル用）。"""
+    lbl = _get_labels(snap)
     sites = snap["sites"]
     if tok == "Await":
-        return "A 待機"
+        return lbl["await"]
+    if tok == "Aout":
+        return lbl["aout"]
     if tok == "D":
-        return "D 滞在"
+        return lbl["d_stay"]
     if tok.startswith("B") and tok[1:].isdigit():
         return f"{sites[int(tok[1:])]['name']} 滞在"
     if tok.startswith("to_B"):

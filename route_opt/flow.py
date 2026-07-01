@@ -123,7 +123,13 @@ class FlowModel:
                     self.init_A[k] += 1
         # D 滞在表（weight, n）
         ts = inst.temporary_site
-        self.cap_max = max(v.capacity for v in inst.vehicle_types.values())
+        # cap_max は「実際に配車される車両（fleet.owned）」の最大定員で決める。
+        # vehicle_types 全体ではなく owned に存在する型のみを見るため、truck を
+        # owned に入れれば自動で truck 定員、ミニバンだけなら minivan 定員になる。
+        # これは下界カット（便数 >= ceil(T/cap_max)）と board グループ上限の両方を
+        # 実態に合わせて締める（owned に居ない大型車で下界が緩むのを防ぐ）。
+        owned_types = {ov.type for ov in inst.fleet.owned}
+        self.cap_max = max(inst.vehicle_types[t].capacity for t in owned_types)
         self.weights = sorted({k[2] for k in self.comm})
         self.dstay = {(w, n): ts.required_hours(w, n)
                       for w in self.weights for n in range(1, self.cap_max + 1)}
@@ -255,6 +261,19 @@ class FlowModel:
                 arr = eout[k, g - site.dout] if (k, g - site.dout) in eout else 0
                 m.Add(b2d[k, g] == b2d[k, g - 1] + arr - board(k, g))
         self.d2b, self.b2d = d2b, b2d
+
+        # ---- A 待機 下限（カテゴリ毎・常時） ----
+        # 「派遣可能 = A 待機」= D から戻った／初期から A に居て B 未派遣のプール d2b
+        # （= anim の "Await"。B から戻り D 待ちの b2d="A 復帰"/"Aout" は含めない）。
+        # カテゴリ毎に各時刻 g で当該カテゴリの d2b 総和 >= 指定人数 を課す。
+        amin = self.inst.await_min_by_category
+        if amin:
+            for c, n in amin.items():
+                if n <= 0:
+                    continue
+                ks = [k for k in comm if k[1] == c]
+                for g in range(commit):
+                    m.Add(sum(d2b[k, g] for k in ks) >= n)
 
         # ---- 車両（便ごとにタイプ別台数を選択）----
         # 各便 tau の台数上限は avail[(tau, vt)]＝その時刻に出発する保有車両の台数。

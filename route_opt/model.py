@@ -325,6 +325,31 @@ class FullModel:
                     m.Add(self.btype[p, mi] + self.btype[p, mi + 1] == 1).OnlyEnforceIf(
                         self.atused[p, mi + 1]
                     )
+                    # B から戻ったら必ず D: commit 内に D 往復が収まるなら次スロットは D 必須
+                    rit = m.NewBoolVar(f"rit_{p}_{mi}")
+                    m.Add(
+                        self.d[p, mi] + self.sdout[p, mi] + cd.round_hours <= commit
+                    ).OnlyEnforceIf(rit)
+                    m.Add(
+                        self.d[p, mi] + self.sdout[p, mi] + cd.round_hours >= commit + 1
+                    ).OnlyEnforceIf(rit.Not())
+                    m.Add(self.atused[p, mi + 1] == 1).OnlyEnforceIf([
+                        self.btype[p, mi], self.leaves[p, mi], rit
+                    ])
+
+            # 最終スロットが B で commit 内に D 往復が収まるなら M 不足（B を許可しない）
+            rit_last = m.NewBoolVar(f"rit_{p}_{M - 1}")
+            m.Add(
+                self.d[p, M - 1] + self.sdout[p, M - 1] + cd.round_hours <= commit
+            ).OnlyEnforceIf(rit_last)
+            m.Add(
+                self.d[p, M - 1] + self.sdout[p, M - 1] + cd.round_hours >= commit + 1
+            ).OnlyEnforceIf(rit_last.Not())
+            m.AddBoolOr([
+                self.atused[p, M - 1].Not(),
+                self.btype[p, M - 1].Not(),
+                rit_last.Not(),
+            ])
 
             # 自己交代禁止
             for k in bsites:
@@ -340,6 +365,60 @@ class FullModel:
                     sum(self.toD[p, mi, j] for mi in range(M))
                     + sum(self.frD[p, mi, j] for mi in range(M)) <= 1
                 )
+
+        # ============ A 待機 下限（カテゴリ毎・常時） ============
+        # 「派遣可能 = A 待機」= D から戻った／初期から A に居て次は B へ向かう人
+        # （flow の d2b プール = anim の "Await"）。B から戻り次は D へ向かう「A 復帰」
+        # （anim の "Aout"）は物理的には A に居るが派遣可能には含めない。これを満たすため、
+        # 各スロットの「不在（=派遣不可）」区間を次のように定義し、カテゴリ c の同時不在数
+        # ≤ 総数 - 下限 を AddCumulative で全時刻保証する（⇔ A 待機 ≥ 下限）:
+        #   - 帰還しない（在勤継続）        : [A 発, H]
+        #   - D 勤務スロットで帰還          : [A 発, A 帰着]（帰着後は Await=派遣可能）
+        #   - B 勤務スロットで帰還          : [A 発, 次スロットの A 発]（= 区間に続く
+        #                                     A 復帰 Aout も不在に含める。次が無ければ H）
+        # ここで A 発 = a - sdin、A 帰着 = d + sdout。移動中も A 不在＝派遣不可側。
+        # 注: ローリング handoff の C→A 移動中（初期に D から A へ帰還途中）の乗客は、
+        # その到着までの区間は不在区間を持たないため A 待機側に数える（近似）。
+        amin = inst.await_min_by_category
+        if amin:
+            away_by_cat: dict[str, list] = {}
+            for p in pax:
+                c = inst.category_of(p)
+                if amin.get(c, 0) <= 0:
+                    continue
+                ivs = away_by_cat.setdefault(c, [])
+                for mi in range(M):
+                    lv, bt = self.leaves[p, mi], self.btype[p, mi]
+                    start = m.NewIntVar(-10000, H, f"awayst_{p}_{mi}")
+                    m.Add(start == self.a[p, mi] - self.sdin[p, mi])
+                    end = m.NewIntVar(0, H, f"awayen_{p}_{mi}")
+                    # 帰還しない: 末尾 H まで不在
+                    m.Add(end == H).OnlyEnforceIf(lv.Not())
+                    # D スロットで帰還（lv ∧ ¬bt）: A 帰着まで
+                    d_leave = m.NewBoolVar(f"dlv_{p}_{mi}")
+                    m.AddBoolAnd([lv, bt.Not()]).OnlyEnforceIf(d_leave)
+                    m.AddBoolOr([lv.Not(), bt]).OnlyEnforceIf(d_leave.Not())
+                    m.Add(end == self.d[p, mi] + self.sdout[p, mi]).OnlyEnforceIf(d_leave)
+                    # B スロットで帰還（lv ∧ bt）: 続く A 復帰も含め次スロットの A 発まで
+                    b_leave = m.NewBoolVar(f"blv_{p}_{mi}")
+                    m.AddBoolAnd([lv, bt]).OnlyEnforceIf(b_leave)
+                    m.AddBoolOr([lv.Not(), bt.Not()]).OnlyEnforceIf(b_leave.Not())
+                    if mi < M - 1:
+                        nxt = self.atused[p, mi + 1]
+                        m.Add(end == self.a[p, mi + 1] - self.sdin[p, mi + 1]).OnlyEnforceIf(
+                            [b_leave, nxt])
+                        m.Add(end == H).OnlyEnforceIf([b_leave, nxt.Not()])
+                    else:
+                        m.Add(end == H).OnlyEnforceIf(b_leave)
+                    size = m.NewIntVar(0, H + 10000, f"awaysz_{p}_{mi}")
+                    m.Add(size == end - start)
+                    ivs.append(m.NewOptionalIntervalVar(
+                        start, size, end, self.atused[p, mi],
+                        f"awayiv_{p}_{mi}"))
+            for c, ivs in away_by_cat.items():
+                total_c = sum(1 for p in pax if inst.category_of(p) == c)
+                cap = total_c - amin[c]   # 同時に派遣可能でなくてよい上限（schema で cap>=0 を保証）
+                m.AddCumulative(ivs, [1] * len(ivs), cap)
 
         # ============ 容量（トリップ単位） ============
         # B-arm は徒歩のため定員制約なし。車両定員は A↔C 便（CD-arm）のみに効く。
@@ -395,6 +474,8 @@ class FullModel:
                 occ = m.NewIntVar(0, len(elig) + init_occ, f"occ_{k}_{j}")
                 m.Add(occ == occ_prev + inc - outc)
                 m.Add(occ >= site.occupancy_min)
+                if site.occupancy_max is not None:
+                    m.Add(occ <= site.occupancy_max)
                 occ_prev = occ
                 ncat = {}
                 for c in cats:

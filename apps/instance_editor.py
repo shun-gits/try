@@ -48,9 +48,18 @@ def get_doc() -> dict:
 
 
 def set_doc(doc: dict) -> None:
+    # ドキュメントを差し替えるときは、各ウィジェットが前のドキュメントの編集値を
+    # session_state に保持し続けるのを防ぐため、ウィジェット状態を全消去する。
+    # Streamlit は key 付きウィジェット（number_input / text_input / selectbox 等）で
+    # value 引数より session_state を優先するため、クリアしないと Load しても古い値が
+    # 表示され、さらに doc 側へ書き戻されてロード値が失われる。doc 本体と doc_version
+    # 以外は派生・ウィジェット状態なので安全に破棄してよい（_editor 等は再構築される）。
+    keep = {"doc", "doc_version"}
+    for k in list(st.session_state):
+        if k not in keep:
+            st.session_state.pop(k, None)
     st.session_state["doc"] = doc
-    # ドキュメントを差し替えたら、各 data_editor の編集キャンバスを作り直させる
-    # ためにバージョンを進める（_editor 参照）。
+    # 各 data_editor の編集キャンバスを作り直させるためにバージョンを進める（_editor 参照）。
     st.session_state["doc_version"] = st.session_state.get("doc_version", 0) + 1
 
 
@@ -160,6 +169,44 @@ def tab_general():
         str(r["date"]).strip() for r in rows if str(r.get("date", "")).strip()
     ]
 
+    st.divider()
+    st.markdown("**表示ラベル（Display labels）**")
+    st.caption(
+        "図・グラフ・テーブルで使う名称を変更できます。"
+        "YAML の `display` セクションとしても保存されます。"
+    )
+    disp = doc.setdefault("display", {})
+    c1, c2, c3 = st.columns(3)
+    disp["await_label"] = c1.text_input(
+        "A 待機ノード名", disp.get("await_label") or "A 待機",
+        help="A 本拠点で待機中の状態ラベル（サイクル図・ガントチャート等に表示）。",
+        key="disp_await")
+    disp["aout_label"] = c2.text_input(
+        "A 復帰ノード名", disp.get("aout_label") or "A 復帰",
+        help="B 島から A へ戻った後の待機状態ラベル。",
+        key="disp_aout")
+    disp["fleet_label"] = c3.text_input(
+        "fleet 便ラベル", disp.get("fleet_label") or "fleet 便",
+        help="A↔C 区間の車両便の状態ラベル（ガントチャート色分け凡例等に表示）。",
+        key="disp_fleet")
+    c4, c5, c6, c7 = st.columns(4)
+    disp["walk_label"] = c4.text_input(
+        "徒歩移動ラベル", disp.get("walk_label") or "徒歩移動",
+        help="徒歩区間（島への往復・C↔D）の状態ラベル。",
+        key="disp_walk")
+    disp["b_stay_label"] = c5.text_input(
+        "B 島滞在ラベル", disp.get("b_stay_label") or "島 滞在",
+        help="B 有人島サイトに滞在中の状態ラベル。",
+        key="disp_b_stay")
+    disp["d_stay_label"] = c6.text_input(
+        "D 滞在ラベル", disp.get("d_stay_label") or "D 滞在",
+        help="D 一時サイトに滞在中の状態ラベル。",
+        key="disp_d_stay")
+    disp["person_suffix"] = c7.text_input(
+        "人数の単位", disp.get("person_suffix") or "名",
+        help="在籍人数の後ろに付く単位文字列（例: 名, 人, pax）。",
+        key="disp_suffix")
+
 
 def tab_vehicles():
     doc = get_doc()
@@ -221,6 +268,25 @@ def _mm_esc(text: str) -> str:
     return str(text).replace('"', "'").replace("\n", "<br/>")
 
 
+def _labels_from_doc(doc: dict) -> dict[str, str]:
+    """doc の display セクションからラベル dict を返す（未設定はデフォルト値）。"""
+    d = doc.get("display") or {}
+    return {
+        "await": str(d.get("await_label") or "A 待機"),
+        "aout": str(d.get("aout_label") or "A 復帰"),
+        "fleet": str(d.get("fleet_label") or "fleet 便"),
+        "walk": str(d.get("walk_label") or "徒歩移動"),
+        "b_stay": str(d.get("b_stay_label") or "島 滞在"),
+        "d_stay": str(d.get("d_stay_label") or "D 滞在"),
+        "person_suffix": str(d.get("person_suffix") or "名"),
+    }
+
+
+def _snap_with_labels(snap: dict, labels: dict[str, str]) -> dict:
+    """snap に現在の doc ラベルを注入したコピーを返す。"""
+    return {**snap, "labels": labels}
+
+
 def _sites_mermaid(doc: dict) -> str:
     """固定ルート Await→Bx→Aout→C→D→C→Await のサイクル図(mermaid)を生成。
 
@@ -231,10 +297,11 @@ def _sites_mermaid(doc: dict) -> str:
     sites = doc.get("staffed_sites", {})
     cd = doc.get("cd_arm") or {}
     tmp = doc.get("temporary_site") or {}
+    lbl = _labels_from_doc(doc)
 
     lines = ["graph TD"]
-    lines.append('  Await(("A 待機")):::anode')
-    lines.append('  Aout(("A 復帰")):::anode')
+    lines.append(f'  Await(("{_mm_esc(lbl["await"])}")):::anode')
+    lines.append(f'  Aout(("{_mm_esc(lbl["aout"])}")):::anode')
 
     if sites:
         for i, (name, s) in enumerate(sites.items()):
@@ -474,6 +541,22 @@ def tab_passengers():
         }
         for r in prows if str(r.get("id", "")).strip()
     ]
+
+    st.subheader("A 待機 最低人数（カテゴリ毎）")
+    st.caption(
+        "各カテゴリで、計画期間中つねに A 本拠点で待機している（どのサイトにも在室せず "
+        "移動中でもない＝派遣可能な）人数の下限を指定します。空の行は制約なし。"
+        "B 島・D へ派遣中／移動中の人は待機にカウントされません。"
+    )
+    amin_rows = _editor(
+        gui_io.intmap_to_rows(doc.get("await_min_by_category", {}), "category", "min"),
+        ["category", "min"], "await_min",
+        column_config={
+            "category": st.column_config.SelectboxColumn(
+                "category", options=cat_opts, help="Masters の categories から選択。"),
+        },
+    )
+    doc["await_min_by_category"] = gui_io.rows_to_intmap(amin_rows, "category", "min")
 
     st.subheader("Passenger rules（赴任可能な B 島サイト）")
     st.caption(
@@ -748,7 +831,8 @@ def tab_run():
 
 # --------------------------------------------------------------------------
 # 配色（拠点種別ごと）
-_COL_A = "#4C72B0"  # A 本拠点
+_COL_A = "#4C72B0"  # A 本拠点（待機）
+_COL_A_RETURN = "#7E57C2"  # A 復帰（B 帰還・D 待ち）
 _COL_B = "#55A868"  # B 有人サイト
 _COL_C = "#C44E52"  # C 中継点
 _COL_D = "#DD8452"  # D 一時サイト
@@ -781,6 +865,8 @@ def _initial_state_mermaid(doc: dict) -> str:
         members[loc].sort()
 
     icon, cap = "🧽", 12  # 在籍人数を表すアイコンと、並べる上限数
+    lbl = _labels_from_doc(doc)
+    suffix = lbl["person_suffix"]
 
     def _roster(loc: str) -> str:
         """ノードラベル末尾に付ける在籍人数表記（アイコン＋人数）。改行は _mm_esc で <br/> 化。"""
@@ -788,11 +874,11 @@ def _initial_state_mermaid(doc: dict) -> str:
         if n == 0:
             return "（不在）"
         icons = icon * min(n, cap) + (f"＋{n - cap}" if n > cap else "")
-        return f"{icons}\n{n}名"
+        return f"{icons}\n{n}{suffix}"
 
     lines = ["graph TD"]
-    lines.append(f'  Await(("{_mm_esc("A 待機" + chr(10) + _roster("A"))}")):::anode')
-    lines.append('  Aout(("A 復帰")):::anode')
+    lines.append(f'  Await(("{_mm_esc(lbl["await"] + chr(10) + _roster("A"))}")):::anode')
+    lines.append(f'  Aout(("{_mm_esc(lbl["aout"])}")):::anode')
 
     if sites:
         for i, (name, s) in enumerate(sites.items()):
@@ -844,7 +930,7 @@ def _occupancy_bar_chart(snap: dict, node_members: dict, total: int) -> alt.Char
     比較がぶれないよう y 軸は乗客総数で固定する。
     """
     series = anim_mod.occupancy_series(snap, node_members)
-    palette = {"B": _COL_B, "D": _COL_D, "A": _COL_A}
+    palette = {"B": _COL_B, "D": _COL_D, "A_RET": _COL_A_RETURN, "A": _COL_A}
     df = pd.DataFrame({
         "拠点": [s[0] for s in series],
         "滞在人数": [s[1] for s in series],
@@ -887,8 +973,9 @@ def _gantt_chart(snap: dict, segs: dict) -> alt.Chart:
     """
     rows = anim_mod.gantt_rows(snap, segs)
     df = pd.DataFrame(rows)
-    palette = {"A 待機": _COL_A, "島 滞在": _COL_B, "D 滞在": _COL_D,
-               "fleet 便": _COL_C, "徒歩移動": "#999999"}
+    lbl = anim_mod._get_labels(snap)
+    palette = {lbl["await"]: _COL_A, lbl["aout"]: _COL_A_RETURN, lbl["b_stay"]: _COL_B,
+               lbl["d_stay"]: _COL_D, lbl["fleet"]: _COL_C, lbl["walk"]: "#999999"}
     order = _natural_passenger_order(list({r["passenger"] for r in rows}))
     H = max(int(snap["H"]), 1)
     return alt.Chart(df).mark_bar().encode(
@@ -904,6 +991,109 @@ def _gantt_chart(snap: dict, segs: dict) -> alt.Chart:
                  alt.Tooltip("start_h:Q", title="開始 h"),
                  alt.Tooltip("end_h:Q", title="終了 h")],
     ).properties(height=alt.Step(22), title="乗客別タイムライン（ガントチャート）")
+
+
+def _occupancy_timeline_chart(snap: dict, segs: dict, step: int) -> alt.Chart:
+    """全期間（step 刻み）の各拠点・移動中の人数を積み上げ棒グラフで返す。
+
+    x 軸: 時刻（計画開始からの h, step 刻み）
+    y 軸: 人数（積み上げ）
+    色 : 拠点種別（B 島=緑 / D=橙 / A 待機=青 / fleet 便=赤 / 徒歩移動=グレー）
+    """
+    lbl = anim_mod._get_labels(snap)
+    H = max(int(snap["H"]), 1)
+    site_names = [s["name"] for s in snap["sites"]]
+    # 積み上げ順: 各 B 島 → D → A 復帰 → A 待機 → fleet 便 → 徒歩移動
+    domains: list[str] = list(site_names)
+    if snap["cd"] is not None:
+        domains.append("D")
+    domains.append(lbl["aout"])
+    domains.append(lbl["await"])
+    if snap["cd"] is not None:
+        domains.append(lbl["fleet"])
+    domains.append(lbl["walk"])
+    color_map: dict[str, str] = {name: _COL_B for name in site_names}
+    if snap["cd"] is not None:
+        color_map["D"] = _COL_D
+    color_map[lbl["aout"]] = _COL_A_RETURN
+    color_map[lbl["await"]] = _COL_A
+    if snap["cd"] is not None:
+        color_map[lbl["fleet"]] = _COL_C
+    color_map[lbl["walk"]] = "#999999"
+    ranges = [color_map[d] for d in domains]
+
+    rows: list[dict] = []
+    for t in range(0, H + 1, step):
+        node_members, edge_members = anim_mod.positions_at(segs, t)
+        for i, s in enumerate(snap["sites"]):
+            rows.append({"時刻(h)": t, "拠点": s["name"],
+                         "人数": len(node_members.get(f"B{i}", []))})
+        if snap["cd"] is not None:
+            rows.append({"時刻(h)": t, "拠点": "D",
+                         "人数": len(node_members.get("D", []))})
+        rows.append({"時刻(h)": t, "拠点": lbl["aout"],
+                     "人数": len(node_members.get("Aout", []))})
+        rows.append({"時刻(h)": t, "拠点": lbl["await"],
+                     "人数": len(node_members.get("Await", []))})
+        # 移動中を fleet 便 / 徒歩移動 に集計
+        walk = fleet = 0
+        for tok, pids in edge_members.items():
+            if anim_mod.token_category(tok, lbl) == lbl["fleet"]:
+                fleet += len(pids)
+            else:
+                walk += len(pids)
+        if snap["cd"] is not None:
+            rows.append({"時刻(h)": t, "拠点": lbl["fleet"], "人数": fleet})
+        rows.append({"時刻(h)": t, "拠点": lbl["walk"], "人数": walk})
+
+    if not rows:
+        return alt.Chart(
+            pd.DataFrame(columns=["時刻(h)", "拠点", "人数"])
+        ).mark_bar()
+
+    df = pd.DataFrame(rows)
+    y_max = max(len(segs), 1)
+    bars = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("時刻(h):Q",
+                    axis=alt.Axis(title=f"時刻 t（計画開始からの h, {step}h 刻み）")),
+            y=alt.Y("人数:Q", stack="zero",
+                    scale=alt.Scale(domain=[0, y_max]),
+                    axis=alt.Axis(title="人数")),
+            color=alt.Color(
+                "拠点:N",
+                scale=alt.Scale(domain=domains, range=ranges),
+                legend=alt.Legend(title="場所・状態", orient="bottom"),
+            ),
+            tooltip=[
+                alt.Tooltip("時刻(h):Q", title="時刻 (h)"),
+                alt.Tooltip("拠点:N", title="場所・状態"),
+                alt.Tooltip("人数:Q", title="人数"),
+            ],
+        )
+        .properties(height=240, title=f"各拠点・移動中の人数の推移（{step}h 刻み）")
+    )
+
+    await_label = lbl["await"]
+    await_df = df[df["拠点"] == await_label].copy()
+    await_line = (
+        alt.Chart(await_df)
+        .mark_line(color=_COL_A, strokeWidth=2, strokeDash=[4, 2], point=True)
+        .encode(
+            x=alt.X("時刻(h):Q"),
+            y=alt.Y("人数:Q",
+                    axis=alt.Axis(title=f"{await_label} 人数", orient="right", titleColor=_COL_A),
+                    scale=alt.Scale(domain=[0, y_max])),
+            tooltip=[
+                alt.Tooltip("時刻(h):Q", title="時刻 (h)"),
+                alt.Tooltip("人数:Q", title=f"{await_label} 人数"),
+            ],
+        )
+    )
+
+    return alt.layer(bars, await_line).resolve_scale(y="independent")
 
 
 def tab_animation():
@@ -925,8 +1115,11 @@ def tab_animation():
         )
         return
 
-    snap, segs = anim["snap"], anim["segs"]
+    # 現在の doc ラベルを snap に注入（ラベル編集が即座に可視化に反映される）。
+    snap = _snap_with_labels(anim["snap"], _labels_from_doc(get_doc()))
+    segs = anim["segs"]
     H = max(int(snap["H"]), 1)
+    st.session_state["anim_H"] = H  # フラグメント内から参照するため session_state にも保持
     try:
         start = _dt.datetime.fromisoformat(snap["start"])
     except (ValueError, TypeError):
@@ -962,14 +1155,19 @@ def tab_animation():
 
     @st.fragment(run_every=run_every)
     def _player():
+        # run_every による自動再実行ではクロージャ変数が初期値に戻る場合があるため、
+        # step / loop / H は session_state から直接読む。
+        _step = int(st.session_state.get("anim_step", 1))
+        _loop = bool(st.session_state.get("anim_loop", True))
+        _H = int(st.session_state.get("anim_H", H))
         # 自動再実行（再生中）でコマを進める。末尾でループ or 停止。
         if st.session_state["anim_playing"]:
-            nt = st.session_state["anim_t"] + step
-            if nt > H:
-                if loop:
+            nt = st.session_state["anim_t"] + _step
+            if nt > _H:
+                if _loop:
                     nt = 0
                 else:
-                    nt = H
+                    nt = _H
                     st.session_state["anim_playing"] = False
                     st.session_state["anim_t"] = nt
                     st.rerun(scope="app")   # タイマーを止めるためフル再実行
@@ -995,9 +1193,11 @@ def tab_animation():
         with left:
             mermaid_click(anim_mod.anim_mermaid(snap, node_members, edge_members),
                           key="anim_graph")
+            _lbl = anim_mod._get_labels(snap)
             moving = sum(len(v) for v in edge_members.values())
             resting = len(node_members.get("Await", []))
-            st.caption(f"この時刻: 移動中 {moving} 名 ／ A 待機 {resting} 名")
+            suffix = _lbl["person_suffix"]
+            st.caption(f"この時刻: 移動中 {moving}{suffix} ／ {_lbl['await']} {resting}{suffix}")
 
         with right:
             st.markdown("**この時刻の各乗客の居場所**")
@@ -1005,7 +1205,7 @@ def tab_animation():
             for tok, pids in {**node_members, **edge_members}.items():
                 for pid in pids:
                     place_of[pid] = anim_mod.place_label(snap, tok)
-            rows = [{"乗客": pid, "現在地": place_of.get(pid, "A 待機")}
+            rows = [{"乗客": pid, "現在地": place_of.get(pid, _lbl["await"])}
                     for pid in sorted(place_of)]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420)
 
@@ -1025,6 +1225,14 @@ def tab_animation():
         "状態別の色（A 待機 / 島 滞在 / D 滞在 / fleet 便 🚐 / 徒歩移動 🚶）で俯瞰できます。"
     )
     st.altair_chart(_gantt_chart(snap, segs), use_container_width=True)
+
+    st.divider()
+    st.markdown("**各拠点の滞在人数の推移（積み上げ棒グラフ）**")
+    st.caption(
+        "全期間を通じて各拠点（B 島=緑 / D=橙 / A 待機=青）と移動中（fleet 便=赤 / 徒歩=グレー）の"
+        f"人数の合計が常に乗客総数と一致します。再生コントロールの「1 コマの進み幅」({step}h)刻みで表示。"
+    )
+    st.altair_chart(_occupancy_timeline_chart(snap, segs, step), use_container_width=True)
 
 
 # --------------------------------------------------------------------------

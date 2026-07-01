@@ -39,6 +39,7 @@ class Stay(BaseModel):
 
 class StaffedSite(BaseModel):
     occupancy_min: int = 0
+    occupancy_max: int | None = None
     category_requirements: dict[str, int] = Field(default_factory=dict)
     stay: Stay
     replacement_required: bool = True
@@ -214,6 +215,17 @@ class SolverParams(BaseModel):
     commit_hours: int | None = None
 
 
+class DisplayLabels(BaseModel):
+    """図・グラフに表示する名称ラベルの設定（YAML の display セクションで上書き可）。"""
+    await_label: str = "A 待機"
+    aout_label: str = "A 復帰"
+    fleet_label: str = "fleet 便"
+    walk_label: str = "徒歩移動"
+    b_stay_label: str = "島 滞在"
+    d_stay_label: str = "D 滞在"
+    person_suffix: str = "名"
+
+
 class Instance(BaseModel):
     planning_horizon: PlanningHorizon
     time_granularity_hours: int = 1
@@ -226,8 +238,13 @@ class Instance(BaseModel):
     masters: Masters = Field(default_factory=Masters)
     passengers: list[Passenger]
     passenger_rules: dict[str, PassengerRule] = Field(default_factory=dict)
+    # カテゴリ毎の「A 待機」最低人数（本拠点 A で待機中＝どのサイトにも在室せず移動中
+    # でもない人を派遣可能とみなす）。各カテゴリで計画期間中つねに指定人数以上が
+    # A 待機していることを強制する。空（既定）なら制約なし。キーは category。
+    await_min_by_category: dict[str, int] = Field(default_factory=dict)
     initial_state: list[InitialPassengerState] = Field(default_factory=list)
     solver: SolverParams = Field(default_factory=SolverParams)
+    display: DisplayLabels = Field(default_factory=DisplayLabels)
 
     @model_validator(mode="after")
     def _check(self) -> "Instance":
@@ -280,6 +297,22 @@ class Instance(BaseModel):
             for s in rule.allowed_sites:
                 if s not in self.staffed_sites:
                     raise ValueError(f"allowed_sites の未知のサイト: {s}")
+        # A 待機 最低人数: キーは既知 category、人数はカテゴリ総数以下であること。
+        if self.await_min_by_category:
+            cat_total: dict[str, int] = {}
+            for p in self.passengers:
+                cat_total[p.category] = cat_total.get(p.category, 0) + 1
+            known_cats = set(self.masters.categories) | set(cat_total)
+            for c, n in self.await_min_by_category.items():
+                if c not in known_cats:
+                    raise ValueError(
+                        f"await_min_by_category の未知の category '{c}'"
+                    )
+                if n > cat_total.get(c, 0):
+                    raise ValueError(
+                        f"await_min_by_category['{c}'] = {n} が "
+                        f"category '{c}' の総人数 {cat_total.get(c, 0)} を超えています"
+                    )
         if self.temporary_site is not None and self.temporary_site.per_weight:
             for w in {p.weight for p in self.passengers}:
                 if w not in self.temporary_site.d_stay_table:

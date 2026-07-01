@@ -138,10 +138,10 @@ def test_occupancy_series_counts_and_order():
             "start": "2025-01-01T00:00:00", "H": 24}
     node_members = {"B0": ["P1", "P2"], "B1": [], "D": ["P3"], "Await": ["P4", "P5", "P6"]}
     series = anim.occupancy_series(snap, node_members)
-    # 並び: 各 B 島 → D → A 待機
-    assert [s[0] for s in series] == ["島A", "島B", "D", "A 待機"]
-    assert [s[1] for s in series] == [2, 0, 1, 3]
-    assert [s[2] for s in series] == ["B", "B", "D", "A"]
+    # 並び: 各 B 島 → D → A 復帰 → A 待機
+    assert [s[0] for s in series] == ["島A", "島B", "D", "A 復帰", "A 待機"]
+    assert [s[1] for s in series] == [2, 0, 1, 0, 3]
+    assert [s[2] for s in series] == ["B", "B", "D", "A_RET", "A"]
 
 
 def test_occupancy_series_excludes_transit_and_matches_total():

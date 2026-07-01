@@ -13,6 +13,11 @@
   #graph .node-selected > polygon,
   #graph .node-selected > circle { stroke: #222 !important; stroke-width: 3px !important; }
   #hint { color: #888; font-size: 11px; text-align: center; padding: 2px 0 4px; }
+  /* mermaid v10 が DOM に直接注入する "Syntax error" 表示を隠す
+     #graph 外の body 直下一時要素にも注入されるためグローバルに指定する */
+  .error-icon,
+  text.error-text,
+  [aria-roledescription="error"] { display: none !important; }
 </style>
 </head>
 <body>
@@ -162,27 +167,41 @@
     let lastCode = null;
     async function render(code, selNode) {
       const el = document.getElementById("graph");
+      let renderId = null;
       try {
         await ensureMermaid();
         if (code !== lastCode) {
           lastCode = code;
           el.removeAttribute("data-processed");
           el.innerHTML = "";
-          const id = "g" + Math.random().toString(36).slice(2);
+          renderId = "g" + Math.random().toString(36).slice(2);
           await waitForLayout();
           // 先に parse で検証する。render に不正コードを渡すと mermaid が DOM に
           // "Syntax error" 爆弾を直接注入するため、parse 失敗は手前で握って弾く。
           await mermaid.parse(code);
-          const { svg, bindFunctions } = await mermaidRenderWithRetry(id, code);
+          const { svg, bindFunctions } = await mermaidRenderWithRetry(renderId, code);
           el.innerHTML = svg;
           if (bindFunctions) bindFunctions(el);
         }
         if (selNode !== undefined) { selected = selNode; }
         markSelected(selected);
       } catch (e) {
-        // 描画に失敗したら次回再試行できるよう lastCode を戻し、原因を可視化する。
         lastCode = null;
-        showError("mermaid 図の描画に失敗しました", (e && e.message) || String(e));
+        // mermaid.render() が body に差し込んだ一時要素をクリーンアップ
+        if (renderId) {
+          const stray = document.getElementById(renderId);
+          if (stray) stray.remove();
+        }
+        // render が el に直接エラー SVG を書いた場合もクリア
+        el.innerHTML = "";
+        const msg = (e && e.message) || String(e);
+        // mermaid 10.9.6 が誤発生させる "Syntax error in text" はユーザに見せない。
+        // console には残してデバッグは可能にしておく。
+        if (msg.includes("Syntax error")) {
+          console.warn("[mermaid_click] suppressed:", msg);
+          return;
+        }
+        showError("mermaid 図の描画に失敗しました", msg);
         return;
       }
       // レンダリング後に実高さへ調整
