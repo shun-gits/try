@@ -170,3 +170,54 @@ def test_weight_dependent_dstay_and_initial_pin():
     # weight で必要 D 滞在が異なることが表に反映されている
     ts = inst.temporary_site
     assert ts.required_hours("large", 1) > ts.required_hours("small", 1)
+
+
+def _transit_instance():
+    """初期 location が島間移動中（A->C / C->A）の乗客を1名ずつ加えたインスタンス。"""
+    inst = _weighted_instance()
+    start = inst.planning_horizon.start
+    inst = inst.model_copy(update={
+        "passengers": inst.passengers + [
+            Passenger(id="P5", category="Cat1", weight="small"),
+            Passenger(id="P6", category="Cat1", weight="small"),
+        ],
+        "passenger_rules": {**inst.passenger_rules,
+                            "P5": PassengerRule(allowed_sites=["B1"]),
+                            "P6": PassengerRule(allowed_sites=["B1"])},
+        "initial_state": inst.initial_state + [
+            # D へ向かう途中（A->C）: 単独到着なので必要滞在は required_hours(small,1)。
+            InitialPassengerState(passenger_id="P5", location="A->C",
+                                  arrived_at=start + timedelta(hours=5)),
+            # A へ戻る途中（C->A）: 指定到着時刻まで B へ入れない。
+            InitialPassengerState(passenger_id="P6", location="C->A",
+                                  arrived_at=start + timedelta(hours=40)),
+        ],
+    })
+    return inst
+
+
+def test_transit_leg_a2c_supported():
+    inst = _transit_instance()
+    mdl = FlowModel(inst)
+    ts = inst.temporary_site
+    sol = mdl.solve(max_seconds=20)
+    assert sol.ok, sol.summary()
+    tl, occ, cat, overlap, alt = _decode_metrics(mdl, sol)
+    assert occ == 0 and cat == 0 and overlap == 0 and alt
+    p5 = tl["P5"]
+    assert p5[0]["kind"] == "D"
+    assert p5[0]["arriveD"] == 5
+    # 必要 D 滞在（単独到着 n=1）を満たしてから A へ戻る
+    assert p5[0]["returnA"] - p5[0]["arriveD"] >= ts.required_hours("small", 1)
+
+
+def test_transit_leg_c2a_supported():
+    inst = _transit_instance()
+    mdl = FlowModel(inst)
+    sol = mdl.solve(max_seconds=20)
+    assert sol.ok, sol.summary()
+    tl, occ, cat, overlap, alt = _decode_metrics(mdl, sol)
+    assert occ == 0 and cat == 0 and overlap == 0 and alt
+    p6 = tl["P6"]
+    # 到着時刻(40h)より前に B へ入場していない
+    assert p6[0]["kind"] == "B" and p6[0]["arrive"] >= 40
