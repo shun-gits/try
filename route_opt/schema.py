@@ -8,12 +8,27 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def _naive(v: datetime | None) -> datetime | None:
+    """tz 付き ISO8601 入力（例: +09:00）も naive に正規化する。
+
+    アプリ全体で日時は「horizon 起点からの相対時間」としてのみ扱われ、tz 情報は
+    意味を持たない。GUI の自由入力（instance_editor.py の text_input）は tz 付き/
+    無しが混在し得るため、ここで統一しないと naive-aware 間の引き算で例外になる。
+    """
+    return v.replace(tzinfo=None) if v is not None and v.tzinfo is not None else v
 
 
 class PlanningHorizon(BaseModel):
     start: datetime
     end: datetime
+
+    @field_validator("start", "end", mode="after")
+    @classmethod
+    def _strip_tz(cls, v: datetime) -> datetime:
+        return _naive(v)
 
     @property
     def hours(self) -> int:
@@ -197,6 +212,11 @@ class InitialPassengerState(BaseModel):
     earliest_departure: datetime | None = None
     # handoff 用: A 待機者の「直前に完了した勤務種別」("B"/"D")。次の勤務はこれと交互でなければならない。
     last_duty: str | None = None
+
+    @field_validator("arrived_at", "earliest_departure", mode="after")
+    @classmethod
+    def _strip_tz(cls, v: datetime | None) -> datetime | None:
+        return _naive(v)
 
     @property
     def transit_leg(self) -> tuple[str, str] | None:
