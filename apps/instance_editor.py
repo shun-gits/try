@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import calendar
+import datetime as _dt
 import pathlib
 import sys
 
@@ -40,6 +42,9 @@ from route_opt.solver_cfg import solver_params_for  # noqa: E402
 
 INSTANCES = pathlib.Path("instances")
 OUTDIR = pathlib.Path("out")
+
+# 移動可視化グラフの X 軸表示モード（doc["display"]["x_axis_mode"] に保存）。
+_X_AXIS_MODES = {"hour": "経過時間 (h)", "date": "日付"}
 
 
 # --------------------------------------------------------------------------
@@ -207,6 +212,17 @@ def tab_general():
         help="在籍人数の後ろに付く単位文字列（例: 名, 人, pax）。",
         key="disp_suffix")
 
+    cur_mode = disp.get("x_axis_mode") or "hour"
+    if cur_mode not in _X_AXIS_MODES:
+        cur_mode = "hour"
+    choice = st.selectbox(
+        "移動可視化グラフの X 軸表示", list(_X_AXIS_MODES.values()),
+        index=list(_X_AXIS_MODES).index(cur_mode),
+        help="移動可視化タブの時系列グラフ（ガントチャート・滞在人数推移・便数推移）の"
+             "X軸を、計画開始からの経過時間(h)、または実際の日付のどちらで表示するかを選べます。",
+        key="disp_x_axis_mode")
+    disp["x_axis_mode"] = next(k for k, v in _X_AXIS_MODES.items() if v == choice)
+
 
 def tab_vehicles():
     doc = get_doc()
@@ -285,6 +301,35 @@ def _labels_from_doc(doc: dict) -> dict[str, str]:
 def _snap_with_labels(snap: dict, labels: dict[str, str]) -> dict:
     """snap に現在の doc ラベルを注入したコピーを返す。"""
     return {**snap, "labels": labels}
+
+
+def _x_axis_mode_from_doc(doc: dict) -> str:
+    """doc の display セクションから X 軸表示モード（"hour" / "date"）を返す。"""
+    mode = str((doc.get("display") or {}).get("x_axis_mode") or "hour")
+    return mode if mode in _X_AXIS_MODES else "hour"
+
+
+def _time_axis(snap: dict, x_axis_mode: str, title: str) -> alt.Axis:
+    """時刻(h) 軸の Altair Axis を返す。date モードでは目盛りを実日時表示に変換する。
+
+    スケール・データ自体は経過時間(h)のまま変えず、labelExpr で見た目だけ
+    「計画開始 + h時間」の日時文字列に変換する（データ列を増やさず済む）。
+    """
+    if x_axis_mode == "date":
+        try:
+            start = _dt.datetime.fromisoformat(snap["start"])
+            # ナイーブな日時をそのまま UTC 時刻とみなす（サーバー/ブラウザの tz に
+            # 依存しないよう、client 側は utcFormat で揃えて描画する）。
+            start_ms = calendar.timegm(start.timetuple()) * 1000
+        except (KeyError, ValueError, TypeError):
+            start_ms = None
+        if start_ms is not None:
+            return alt.Axis(
+                title="日時",
+                labelExpr=f"utcFormat({start_ms} + datum.value * 3600000, '%m/%d %H:%M')",
+                labelAngle=-40,
+            )
+    return alt.Axis(title=title)
 
 
 def _sites_mermaid(doc: dict) -> str:
@@ -1024,11 +1069,11 @@ def _natural_passenger_order(pids: list[str]) -> list[str]:
     return sorted(pids, key=key)
 
 
-def _gantt_chart(snap: dict, segs: dict) -> alt.Chart:
+def _gantt_chart(snap: dict, segs: dict, x_axis_mode: str = "hour") -> alt.Chart:
     """乗客別タイムライン（ガントチャート）を Altair で返す。
 
-    縦軸＝乗客、横軸＝時間（計画開始からの h）。各乗客の在不在・移動を、状態カテゴリ
-    （A 待機 / 島 滞在 / D 滞在 / fleet 便 / 徒歩移動）で色分けした横棒で示す。
+    縦軸＝乗客、横軸＝時間（計画開始からの h、または日付）。各乗客の在不在・移動を、
+    状態カテゴリ（A 待機 / 島 滞在 / D 滞在 / fleet 便 / 徒歩移動）で色分けした横棒で示す。
     色はサイクル図・棒グラフのノード配色に合わせる。
     """
     rows = anim_mod.gantt_rows(snap, segs)
@@ -1040,7 +1085,7 @@ def _gantt_chart(snap: dict, segs: dict) -> alt.Chart:
     H = max(int(snap["H"]), 1)
     return alt.Chart(df).mark_bar().encode(
         x=alt.X("start_h:Q", scale=alt.Scale(domain=[0, H], nice=False),
-                axis=alt.Axis(title="時刻 t（計画開始からの h）")),
+                axis=_time_axis(snap, x_axis_mode, "時刻 t（計画開始からの h）")),
         x2="end_h:Q",
         y=alt.Y("passenger:N", sort=order, axis=alt.Axis(title="乗客")),
         color=alt.Color("category:N",
@@ -1053,10 +1098,10 @@ def _gantt_chart(snap: dict, segs: dict) -> alt.Chart:
     ).properties(height=alt.Step(22), title="乗客別タイムライン（ガントチャート）")
 
 
-def _occupancy_timeline_chart(snap: dict, segs: dict, step: int) -> alt.Chart:
+def _occupancy_timeline_chart(snap: dict, segs: dict, step: int, x_axis_mode: str = "hour") -> alt.Chart:
     """全期間（step 刻み）の各拠点・移動中の人数を積み上げ棒グラフで返す。
 
-    x 軸: 時刻（計画開始からの h, step 刻み）
+    x 軸: 時刻（計画開始からの h、または日付, step 刻み）
     y 軸: 人数（積み上げ）
     色 : 拠点種別（B 島=緑 / D=橙 / A 待機=青 / fleet 便=赤 / 徒歩移動=グレー）
     """
@@ -1118,7 +1163,7 @@ def _occupancy_timeline_chart(snap: dict, segs: dict, step: int) -> alt.Chart:
         .mark_bar()
         .encode(
             x=alt.X("時刻(h):Q",
-                    axis=alt.Axis(title=f"時刻 t（計画開始からの h, {step}h 刻み）")),
+                    axis=_time_axis(snap, x_axis_mode, f"時刻 t（計画開始からの h, {step}h 刻み）")),
             y=alt.Y("人数:Q", stack="zero",
                     scale=alt.Scale(domain=[0, y_max]),
                     axis=alt.Axis(title="人数")),
@@ -1156,9 +1201,38 @@ def _occupancy_timeline_chart(snap: dict, segs: dict, step: int) -> alt.Chart:
     return alt.layer(bars, await_line).resolve_scale(y="independent")
 
 
-def tab_animation():
-    import datetime as _dt
+def _fleet_trip_chart(snap: dict, segs: dict, step: int, x_axis_mode: str = "hour") -> alt.Chart:
+    """A→C / C→A 便の出発本数を時系列の棒グラフ(Altair)で返す。
 
+    x 軸: 時刻（計画開始からの h、または日付, step 刻みで集計）
+    y 軸: 本数（同一 step 幅内に出発した便の数）
+    色 : 方向（A→C / C→A）
+    """
+    H = max(int(snap["H"]), 1)
+    trips = anim_mod.fleet_trip_times(segs)
+    directions = [("AtoC", "A→C 便"), ("CtoA", "C→A 便")]
+    rows = [{"時刻(h)": (t0 // step) * step, "方向": label}
+            for tok, label in directions for t0 in trips.get(tok, [])]
+    columns = ["時刻(h)", "方向", "本数"]
+    df = (pd.DataFrame(rows).groupby(["時刻(h)", "方向"]).size().reset_index(name="本数")
+          if rows else pd.DataFrame(columns=columns))
+    domain = [label for _tok, label in directions]
+    palette = {"A→C 便": _COL_C, "C→A 便": _COL_A_RETURN}
+    return alt.Chart(df).mark_bar().encode(
+        x=alt.X("時刻(h):Q", scale=alt.Scale(domain=[0, H], nice=False),
+                axis=_time_axis(snap, x_axis_mode, f"時刻 t（計画開始からの h, {step}h 刻み）")),
+        y=alt.Y("本数:Q", axis=alt.Axis(title="本数", tickMinStep=1)),
+        color=alt.Color("方向:N",
+                        scale=alt.Scale(domain=domain, range=[palette[d] for d in domain]),
+                        legend=alt.Legend(title="便", orient="bottom")),
+        xOffset="方向:N",
+        tooltip=[alt.Tooltip("時刻(h):Q", title="時刻 (h)"),
+                 alt.Tooltip("方向:N", title="便"),
+                 alt.Tooltip("本数:Q", title="本数")],
+    ).properties(height=200, title=f"A→C / C→A 便の本数推移（{step}h 刻み）")
+
+
+def tab_animation():
     st.subheader("移動可視化（タイムスライダー）")
     st.caption(
         "Run タブで解いた結果をもとに、各島・拠点を人が移動し fleet が載せていく様子を、"
@@ -1176,7 +1250,9 @@ def tab_animation():
         return
 
     # 現在の doc ラベルを snap に注入（ラベル編集が即座に可視化に反映される）。
-    snap = _snap_with_labels(anim["snap"], _labels_from_doc(get_doc()))
+    doc = get_doc()
+    snap = _snap_with_labels(anim["snap"], _labels_from_doc(doc))
+    x_axis_mode = _x_axis_mode_from_doc(doc)
     segs = anim["segs"]
     H = max(int(snap["H"]), 1)
     st.session_state["anim_H"] = H  # フラグメント内から参照するため session_state にも保持
@@ -1284,7 +1360,7 @@ def tab_animation():
         "縦軸が乗客、横軸が時間です。各乗客が全期間を通じてどこに居て、いつ移動したかを"
         "状態別の色（A 待機 / 島 滞在 / D 滞在 / fleet 便 🚐 / 徒歩移動 🚶）で俯瞰できます。"
     )
-    st.altair_chart(_gantt_chart(snap, segs), use_container_width=True)
+    st.altair_chart(_gantt_chart(snap, segs, x_axis_mode), use_container_width=True)
 
     st.divider()
     st.markdown("**各拠点の滞在人数の推移（積み上げ棒グラフ）**")
@@ -1292,7 +1368,16 @@ def tab_animation():
         "全期間を通じて各拠点（B 島=緑 / D=橙 / A 待機=青）と移動中（fleet 便=赤 / 徒歩=グレー）の"
         f"人数の合計が常に乗客総数と一致します。再生コントロールの「1 コマの進み幅」({step}h)刻みで表示。"
     )
-    st.altair_chart(_occupancy_timeline_chart(snap, segs, step), use_container_width=True)
+    st.altair_chart(_occupancy_timeline_chart(snap, segs, step, x_axis_mode), use_container_width=True)
+
+    if snap["cd"] is not None:
+        st.divider()
+        st.markdown("**A→C / C→A 便の本数推移**")
+        st.caption(
+            "横軸が時間、縦軸が本数です。fleet 便（🚐）が A→C・C→A それぞれ何本"
+            f"出発したかを、再生コントロールの「1 コマの進み幅」({step}h)刻みで集計します。"
+        )
+        st.altair_chart(_fleet_trip_chart(snap, segs, step, x_axis_mode), use_container_width=True)
 
 
 # --------------------------------------------------------------------------

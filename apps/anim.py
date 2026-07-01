@@ -271,6 +271,20 @@ def occupancy_series(snap: dict, node_members: dict) -> list[tuple[str, int, str
     return series
 
 
+def fleet_trip_times(segs: dict[str, list[tuple]]) -> dict[str, list[int]]:
+    """AtoC / CtoA 各便の出発時刻一覧を返す（本数グラフ用）。
+
+    Flow モデルは各出発スロット tau で高々1便（積載クラス z[tau,n] は排他的）
+    しか出さないため、同じ開始時刻を持つ区間は同一便の同乗者とみなし重複除去する。
+    """
+    times: dict[str, set[int]] = {"AtoC": set(), "CtoA": set()}
+    for ivs in segs.values():
+        for t0, _t1, tok in ivs:
+            if tok in times:
+                times[tok].add(t0)
+    return {k: sorted(v) for k, v in times.items()}
+
+
 def token_category(tok: str, labels: dict[str, str] | None = None) -> str:
     """place_token を色分け用カテゴリへ畳む（ガント / 凡例で状態をまとめて見せる）。
 
