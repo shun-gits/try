@@ -107,5 +107,6 @@ def solver_params_for(inst: Instance) -> SolverParams:
             else theory["trips_cd"]
         ),
         max_seconds=float(cfg.get("max_seconds", 30.0)),
+        relative_gap=float(cfg.get("relative_gap", 0.0) or 0.0),
         commit_hours=(int(cfg["commit_hours"]) if cfg.get("commit_hours") is not None else None),
     )

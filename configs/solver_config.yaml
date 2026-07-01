@@ -9,6 +9,14 @@
 # max_seconds
 #   ソルバーの最大実行時間（秒）。時間内に最適解が見つからない場合は暫定解を返します。
 #
+# relative_gap
+#   相対ギャップ許容値。CP-SAT は (objective - bound) / bound がこの値以下に
+#   なった時点で探索を打ち切り OPTIMAL 扱いにします。下界（bound）が構造的に弱く
+#   厳密な最適証明に時間がかかる問題（例: 往路/復路が別便になる配車最小化）で、
+#   「これ以上の改善解は無い」と分かっているのに時間切れ FEASIBLE になるのを防ぎます。
+#   0.0 で無効（厳密最適を目指す）。1.0 なら「暫定解が下界の2倍以内」で停止。
+#   停止時は summary に探索した分枝数（検討候補の規模）を表示します。
+#
 # commit_hours
 #   ローリングホライズン使用時のコミット幅（時間）。
 #   null にすると計画期間全体を一括で解く単一ウィンドウモードになります。
@@ -17,4 +25,5 @@ max_visits_per_passenger: null
 trips_per_site: null
 trips_cd: null
 max_seconds: 30.0
+relative_gap: 1.0
 commit_hours: null

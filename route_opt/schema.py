@@ -210,6 +210,10 @@ class SolverParams(BaseModel):
     trips_per_site: int = 8
     trips_cd: int = 8
     max_seconds: float = 30.0
+    # 相対ギャップ許容値。>0 なら (incumbent-bound)/incumbent がこの値以下になった
+    # 時点で「最適扱い」で探索を打ち切る（下界が弱く optimal 証明に時間がかかる問題を
+    # 実務的な誤差で早期停止するため）。0.0（既定）なら無効＝厳密最適を目指す。
+    relative_gap: float = 0.0
     # ローリングホライズン用: トリップを [0, commit_hours] のみに制限（lookahead と分離）。
     # None なら planning horizon 全体（=単一ウィンドウ）。
     commit_hours: int | None = None

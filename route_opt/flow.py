@@ -38,6 +38,7 @@ class FlowUnsupported(ValueError):
 class _Site:
     name: str
     occ_min: int
+    occ_max: int | None
     cat_req: dict           # category -> 必要数
     smin: int
     smax: int
@@ -99,7 +100,8 @@ class FlowModel:
         self.sites: dict[str, _Site] = {}
         for name, s in inst.staffed_sites.items():
             self.sites[name] = _Site(
-                name=name, occ_min=s.occupancy_min, cat_req=dict(s.category_requirements),
+                name=name, occ_min=s.occupancy_min, occ_max=s.occupancy_max,
+                cat_req=dict(s.category_requirements),
                 smin=s.stay.min_hours, smax=s.stay.max_hours,
                 din=s.segments.inbound_hours, dout=s.segments.outbound_hours,
                 together=[tuple(g) for g in s.ride_together])
@@ -230,6 +232,8 @@ class FlowModel:
             for g in range(commit):
                 if site.occ_min:
                     m.Add(sum(Bocc[k, g] for k in ks) >= site.occ_min)
+                if site.occ_max is not None:
+                    m.Add(sum(Bocc[k, g] for k in ks) <= site.occ_max)
                 for c, req in site.cat_req.items():
                     if req:
                         kc = [k for k in ks if k[1] == c]
@@ -354,7 +358,8 @@ class FlowModel:
         # 目的: 車両費 = Σ 台数 * drive * hourly
         terms = [self.nveh[t, vt] * self.drive * self.vtypes[vt][1]
                  for (t, vt) in self.nveh]
-        m.Minimize(sum(terms))
+        self.obj = sum(terms)          # K-best 列挙で objective>=lb を課すため保持
+        m.Minimize(self.obj)
         self.ret_of = ret_of
 
     # ------------------------------------------------------------------
@@ -363,6 +368,9 @@ class FlowModel:
         s = cp_model.CpSolver()
         s.parameters.max_time_in_seconds = max_seconds or self.inst.solver.max_seconds
         s.parameters.num_search_workers = workers
+        # 相対ギャップ許容（>0 なら early stop で OPTIMAL 扱い）。
+        if self.inst.solver.relative_gap > 0:
+            s.parameters.relative_gap_limit = self.inst.solver.relative_gap
         # callback（SolutionRecorder）を渡すと改善解の列を記録できる（GUI の改善グラフ用）。
         st = s.Solve(self.m, callback) if callback is not None else s.Solve(self.m)
         return FlowSolution(self, s, st)
@@ -450,12 +458,45 @@ class FlowSolution:
         return out
 
     def summary(self) -> str:
+        from .model import optimality_note, search_stat_lines
         s, mdl = self.solver, self.model
         lines = [f"status: {s.StatusName(self.status)}"]
         if not self.ok:
+            lines += search_stat_lines(s)
             return "\n".join(lines)
-        lines.append(f"objective (vehicle cost): {s.ObjectiveValue():.0f}")
-        lines.append(f"bound: {s.BestObjectiveBound():.0f}")
+        c, b = s.ObjectiveValue(), s.BestObjectiveBound()
+        gap = (c - b) / c * 100 if c else 0.0
+        lines.append(f"objective (vehicle cost): {c:.0f}")
+        lines.append(f"bound: {b:.0f}")
+        lines.append(f"gap: {gap:.1f}%")
         nf = sum(int(s.Value(mdl.nveh[t, vt])) for (t, vt) in mdl.nveh)
         lines.append(f"vehicle-trips: {nf}")
+        lines += search_stat_lines(s)
+        lines.append(optimality_note(self.status, gap))
         return "\n".join(lines)
+
+
+def k_best_costs(inst: Instance, k: int = 5, seconds_each: float = 15.0,
+                 workers: int = 8) -> list[dict]:
+    """採用解を含め、達成可能なコスト水準を安い順に最大 k 個列挙する。
+
+    各段で「目的関数 >= 前段コスト + 1」を課して再求解し、次に安い実行可能コストを
+    得る（同一モデルへ制約を追記して再ソルブ＝再構築なしで高速）。返り値は
+    [{rank, cost, status, wall, branches}]。status=OPTIMAL の段は「そのコストが
+    その下限以下で最小」と証明済み。INFEASIBLE に達したら（=それ以上高い解は無い）
+    列挙を打ち切る。「他の候補はどれも採用解より高い」ことを可視化する用途。
+    """
+    mdl = FlowModel(inst)
+    rows: list[dict] = []
+    for rank in range(1, k + 1):
+        s = cp_model.CpSolver()
+        s.parameters.max_time_in_seconds = seconds_each
+        s.parameters.num_search_workers = workers
+        st = s.Solve(mdl.m)
+        if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            break                       # これより高いコストの解は存在しない
+        c = int(round(s.ObjectiveValue()))
+        rows.append({"rank": rank, "cost": c, "status": s.StatusName(st),
+                     "wall": round(s.WallTime(), 1), "branches": s.NumBranches()})
+        mdl.m.Add(mdl.obj >= c + 1)     # 次段はこれより高いコストのみ
+    return rows

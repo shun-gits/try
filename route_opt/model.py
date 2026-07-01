@@ -46,6 +46,31 @@ class SolutionRecorder(cp_model.CpSolverSolutionCallback):
         })
 
 
+def search_stat_lines(solver) -> list[str]:
+    """求解の探索規模を人間可読で返す。
+
+    『候補を探し尽くした上での最適』という納得感を示すため、検討した分枝数
+    （＝評価した候補の規模）と枝刈り数・経過を summary に載せる。early stop
+    （relative_gap）でも厳密 OPTIMAL でも同じ体裁で表示する。
+    """
+    return [
+        "--- 探索統計 ---",
+        f"検討した分枝 (branches): {solver.NumBranches():,}",
+        f"枝刈り (conflicts): {solver.NumConflicts():,}",
+        f"経過時間: {solver.WallTime():.1f}s",
+    ]
+
+
+def optimality_note(status, gap_pct: float) -> str:
+    """停止理由に応じた最適性コメント。gap_pct は (obj-bound)/obj*100。"""
+    if status == cp_model.OPTIMAL and gap_pct < 1e-6:
+        return "→ 最適性を厳密に証明（bound = objective）。"
+    if status == cp_model.OPTIMAL:
+        return ("→ 相対ギャップ許容内で停止。上記 branches を探索してもこれ以上安い解は "
+                f"見つからず、実質最適と判断（残差 gap {gap_pct:.1f}% は下界の緩さに由来）。")
+    return "→ 時間制限により停止（最適未証明）。上記の探索範囲での最良解。"
+
+
 class FullModel:
     def __init__(self, inst: Instance):
         if inst.cd_arm is None or inst.temporary_site is None:
@@ -563,6 +588,8 @@ class FullModel:
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = self.inst.solver.max_seconds
         solver.parameters.num_search_workers = 8
+        if self.inst.solver.relative_gap > 0:
+            solver.parameters.relative_gap_limit = self.inst.solver.relative_gap
         status = (solver.Solve(self.m, callback) if callback is not None
                   else solver.Solve(self.m))
         return FullSolution(self, solver, status)
@@ -580,8 +607,14 @@ class FullSolution:
         s, mdl, inst = self.solver, self.model, self.model.inst
         lines = [f"status: {s.StatusName(self.status)}"]
         if not self.ok:
+            lines += search_stat_lines(s)
             return "\n".join(lines)
-        lines.append(f"objective (total vehicle cost): {s.ObjectiveValue():.0f}")
+        c, b = s.ObjectiveValue(), s.BestObjectiveBound()
+        gap = (c - b) / c * 100 if c else 0.0
+        lines.append(f"objective (total vehicle cost): {c:.0f}")
+        lines.append(f"bound: {b:.0f}  gap: {gap:.1f}%")
+        lines += search_stat_lines(s)
+        lines.append(optimality_note(self.status, gap))
         pax = [p.id for p in inst.passengers]
         lines.append("--- B handovers (徒歩, 配車なし) ---")
         for k in mdl.bsites:

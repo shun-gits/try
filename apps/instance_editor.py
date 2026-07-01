@@ -31,7 +31,7 @@ import streamlit.components.v1 as components  # noqa: E402
 from apps import anim as anim_mod  # noqa: E402
 from route_opt import gui_io  # noqa: E402
 from route_opt.bench import make_instance  # noqa: E402
-from route_opt.flow import FlowModel, FlowUnsupported  # noqa: E402
+from route_opt.flow import FlowModel, FlowUnsupported, k_best_costs  # noqa: E402
 from route_opt.loader import load_instance  # noqa: E402
 from route_opt.model import FullModel, SolutionRecorder  # noqa: E402
 from route_opt.report import plot_gantt, trips_df, write_csv  # noqa: E402
@@ -786,6 +786,49 @@ def _show_flow_schedule(mdl, sol) -> None:
     st.dataframe(df, width="stretch", hide_index=True)
 
 
+def _show_k_best(inst, k: int, seconds_each: float) -> None:
+    """採用解を含む上位 k コスト水準を安い順に列挙してグラフ表示する。
+
+    「他の実行可能解はどれも採用解より高い」ことを示し、最小化の納得感を与える。
+    2 番目の水準が OPTIMAL 証明されていれば、採用解との間に解が無い＝採用解が最適
+    である強い根拠になる（下界が緩く直接証明できない場合の代替）。
+    """
+    st.subheader("代替解のコスト（安い順 K-best）")
+    with st.spinner(f"上位 {k} コスト水準を列挙中..."):
+        rows = k_best_costs(inst, k=k, seconds_each=seconds_each)
+    if not rows:
+        st.warning("実行可能解が見つかりませんでした。")
+        return
+    df = pd.DataFrame(rows)
+    adopted = df["cost"].min()
+    df["区分"] = df["rank"].map(lambda r: "採用解" if r == 1 else "代替解")
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("rank:O", title="安い順の順位"),
+            y=alt.Y("cost:Q", title="コスト", scale=alt.Scale(zero=False)),
+            color=alt.Color("区分:N",
+                            scale=alt.Scale(domain=["採用解", "代替解"],
+                                            range=["#4C72B0", "#C44E52"])),
+            tooltip=["rank", "cost", "status", "wall", "branches"],
+        )
+        + alt.Chart(pd.DataFrame({"y": [adopted]})).mark_rule(
+            strokeDash=[4, 4], color="#4C72B0").encode(y="y:Q")
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(
+        "左端（順位1・青）が採用解、右へ行くほど高コストの代替解。各バーは『そのコスト水準で"
+        "実現可能な最良解』で、status=OPTIMAL は『その水準以下は実現不可』と証明済み。"
+        "順位2 が OPTIMAL なら採用解との間に解は無く、採用解が最適である根拠になります。"
+    )
+    table = df.rename(columns={"rank": "順位", "cost": "コスト", "status": "状態",
+                               "wall": "求解秒", "branches": "分枝数"})
+    table["採用解との差"] = (df["cost"] - adopted)
+    st.dataframe(table[["順位", "コスト", "採用解との差", "状態", "求解秒", "分枝数"]],
+                 width="stretch", hide_index=True)
+
+
 def tab_run():
     st.subheader("Run solver")
     st.caption("現在の設定でソルバーを実行します（Flow エンジン）。")
@@ -827,6 +870,23 @@ def tab_run():
                     "source": "Single window / Flow",
                 }
                 st.success("→「移動可視化」タブで時刻スライダーによるアニメーションを確認できます。")
+
+    st.divider()
+    st.caption("採用解に加え、次に安い代替解を安い順に列挙してコストを比較します"
+               "（『他はどれも高い＝これが最適』の可視化）。列挙は都度ソルバーを回すため"
+               "時間がかかります。")
+    kc1, kc2 = st.columns(2)
+    k = kc1.number_input("列挙する候補数 K", min_value=2, max_value=15, value=5, step=1)
+    sec = kc2.number_input("1候補あたり上限秒", min_value=1.0, max_value=120.0,
+                           value=15.0, step=1.0)
+    if st.button("代替解を列挙 (K-best)"):
+        try:
+            FlowModel(inst)
+        except FlowUnsupported as e:
+            st.error("Flow エンジンは未対応の構成です:")
+            st.code(str(e))
+        else:
+            _show_k_best(inst, int(k), float(sec))
 
 
 # --------------------------------------------------------------------------
