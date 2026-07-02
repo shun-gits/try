@@ -1,6 +1,6 @@
 """時間展開フローモデル（route_opt/flow.py）のテスト。
 
-連続時間の FullModel に対する代替ソルバ。固定ダイヤ前提で、匿名フロー求解＋経路分解により
+固定ダイヤ前提で、匿名フロー求解＋経路分解により
 個体（乗客 id）スケジュールを復元する。検証観点:
   - 固定ダイヤ必須（未指定は FlowUnsupported）。
   - 解の妥当性: 復号した個体スケジュールが B 占有・カテゴリ要件を満たし、各乗客が時間的に
@@ -170,6 +170,32 @@ def test_weight_dependent_dstay_and_initial_pin():
     # weight で必要 D 滞在が異なることが表に反映されている
     ts = inst.temporary_site
     assert ts.required_hours("large", 1) > ts.required_hours("small", 1)
+
+
+def test_per_weight_occupancy_max_respected():
+    """weight 別 occupancy_max が weight ごとに独立して守られる。"""
+    inst = _weighted_instance()
+    inst = inst.model_copy(update={"temporary_site": inst.temporary_site.model_copy(
+        update={"occupancy_max": {"small": 1, "large": 1}})})
+    mdl = FlowModel(inst)
+    sol = mdl.solve(max_seconds=20)
+    assert sol.ok, sol.summary()
+    tl, occ, cat, overlap, alt = _decode_metrics(mdl, sol)
+    assert occ == 0 and cat == 0 and overlap == 0 and alt
+    # 復号スケジュールから weight 別の D 同時在室数を再構成して上限 1 を検証。
+    # D 在室区間 = [arriveD, 復路便折返しの D 発) = [arriveD, returnA - c_a - d_c)。
+    cd = inst.cd_arm
+    for w in ("small", "large"):
+        cov = [0] * (mdl.H + 1)
+        for pid, acts in tl.items():
+            if mdl.pax_comm[pid][2] != w:
+                continue
+            for a in acts:
+                if a["kind"] == "D":
+                    leave = a["returnA"] - cd.c_a_hours - cd.d_c_hours
+                    for g in range(a["arriveD"], min(leave, mdl.H + 1)):
+                        cov[g] += 1
+        assert max(cov) <= 1, f"weight={w} の D 同時在室が上限超過"
 
 
 def _transit_instance():

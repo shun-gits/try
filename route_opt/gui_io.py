@@ -206,6 +206,38 @@ def rows_to_d_stay_table(rows: list[dict]) -> dict:
     return per if per else flat
 
 
+# ---- temporary_site.occupancy_max (int / per-weight {weight->max}) ----
+def occupancy_max_to_rows(v) -> list[dict]:
+    """occupancy_max -> (weight, max) 行。int は weight='*'（全カテゴリ合算の総数上限）、
+    None（無制限）は行なし。"""
+    if v is None:
+        return []
+    if isinstance(v, dict):
+        return [{"weight": str(w), "max": int(n)} for w, n in v.items()]
+    return [{"weight": "*", "max": int(v)}]
+
+
+def rows_to_occupancy_max(rows: list[dict]):
+    """(weight, max) 行 -> occupancy_max。weight が全て '*'/空なら int（総数上限）、
+    体重カテゴリ指定があれば per-weight（その場合 '*' 行は無視）。行なしは None（無制限）。"""
+    flat: int | None = None
+    per: dict[str, int] = {}
+    for r in rows:
+        raw = r.get("max")
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        w = str(r.get("weight", "")).strip()
+        if w in ("", "*"):
+            flat = n
+        else:
+            per[w] = n
+    return per if per else flat
+
+
 # ---- ride_together (list[list[str]] <-> "Cat1,Cat2; Cat3,Cat4") ----
 def ride_together_to_str(groups: list[list[str]]) -> str:
     return "; ".join(", ".join(g) for g in groups)

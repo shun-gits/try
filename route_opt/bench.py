@@ -1,20 +1,14 @@
-"""スケール検証用ベンチ。
+"""検証用インスタンス生成。
 
-実規模に近い feasible インスタンスを生成し、モデル規模・ビルド時間・求解時間を測る。
+実規模に近い feasible インスタンスを生成する（GUI のサンプル生成・テストで使用）。
 構造を素直に保つため、島ごとに別カテゴリ（B{i}=Cat{i}）・together なし・各乗客は自島のみ適格、
 とする（allowedB 絞り込みのミティゲーションが効いた状態）。
-
-  python -m route_opt.bench
 """
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta
 
-from ortools.sat.python import cp_model
-
-from .model import FullModel
 from .schema import (
     CDArm,
     Calendar,
@@ -89,35 +83,3 @@ def make_instance(*, days: int, islands: int, workers_per_island: int,
     )
 
 
-def run_case(label: str, **kw) -> None:
-    inst = make_instance(**kw)
-    npax = len(inst.passengers)
-    t0 = time.perf_counter()
-    mdl = FullModel(inst)
-    build = time.perf_counter() - t0
-    proto = mdl.m.Proto()
-    nvars = len(proto.variables)
-    ncons = len(proto.constraints)
-    sol = mdl.solve()
-    name = sol.solver.StatusName(sol.status)
-    obj = f"{sol.solver.ObjectiveValue():.0f}" if sol.ok else "-"
-    print(f"{label:<26} pax={npax:<3} H={inst.planning_horizon.hours:<4} "
-          f"vars={nvars:<7} cons={ncons:<7} build={build:5.1f}s "
-          f"solve={sol.solver.WallTime():6.1f}s {name:<11} obj={obj}")
-
-
-def main() -> None:
-    print("=== scale sweep (per-solve time limit applies) ===")
-    # 小 → 中 → 実規模へ段階的に
-    run_case("tiny  1isl x2 x7d",  days=7,  islands=1, workers_per_island=2,
-             vans=1, trucks=0, M=4, J=8, JCD=6, max_seconds=20)
-    run_case("small 1isl x4 x14d", days=14, islands=1, workers_per_island=4,
-             vans=1, trucks=0, M=6, J=14, JCD=12, max_seconds=30)
-    run_case("med   3isl x4 x14d", days=14, islands=3, workers_per_island=4,
-             vans=2, trucks=1, M=6, J=14, JCD=16, max_seconds=45)
-    run_case("big   3isl x10 x30d", days=30, islands=3, workers_per_island=10,
-             vans=3, trucks=1, M=8, J=24, JCD=40, max_seconds=60)
-
-
-if __name__ == "__main__":
-    main()

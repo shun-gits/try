@@ -1,6 +1,6 @@
 """移動可視化ロジック（apps/anim.py）のテスト。
 
-Run solver の解（Flow decode / RollingResult）から作る「乗客別の時刻区間」と、
+Run solver の解（Flow decode）から作る「乗客別の時刻区間」と、
 時刻 t のスナップショット（拠点在籍・移動中人数）が、解の占有を保ち矛盾なく
 復元できることを検証する。
 """
@@ -11,7 +11,6 @@ import pytest
 from apps import anim
 from route_opt.bench import make_instance
 from route_opt.flow import FlowModel
-from route_opt.rolling import solve_rolling
 
 DEP = [0, 6, 12, 18]
 
@@ -109,17 +108,6 @@ def test_mermaid_renders_tokens_and_icons():
     assert found, "全時刻で移動が一切検出されなかった（区間構築の不具合の疑い）"
 
 
-def test_rolling_intervals_partition():
-    inst = make_instance(days=10, islands=1, workers_per_island=3, vans=2, trucks=0,
-                         M=6, J=60, JCD=60, max_seconds=15)
-    r = solve_rolling(inst, window_days=6, step_days=5, verbose=False)
-    assert r.ok, r.message
-    snap = anim.route_snapshot(inst)
-    segs = anim.intervals_from_rolling(inst, r)
-    assert set(segs) == {p.id for p in inst.passengers}
-    _check_partition(inst, snap, segs)
-
-
 def test_place_label_human_readable():
     snap = {"sites": [{"name": "島A", "inb": 2, "out": 2}], "cd": None,
             "start": "2025-01-01T00:00:00", "H": 24}
@@ -206,6 +194,24 @@ def test_gantt_rows_empty_segments_fill_await():
     rows = anim.gantt_rows(snap, {"P1": []})
     assert rows == [{"passenger": "P1", "start_h": 0, "end_h": 10,
                      "place": "A 待機", "category": "A 待機"}]
+
+
+def test_fleet_trip_times_dedupes_same_departure_and_matches_tokens():
+    """同時刻に出発する複数乗客は同一便として1本にまとめられ、区間の開始時刻と一致する。"""
+    inst = _tt(12, 1, 4)
+    sol = FlowModel(inst).solve(max_seconds=20)
+    assert sol.ok, sol.summary()
+    segs = anim.intervals_from_flow(inst, sol.decode())
+    trips = anim.fleet_trip_times(segs)
+    assert set(trips) == {"AtoC", "CtoA"}
+    for tok, times in trips.items():
+        assert times == sorted(set(times))  # 重複除去済み・昇順
+        expected = {t0 for ivs in segs.values() for t0, _t1, t in ivs if t == tok}
+        assert set(times) == expected
+
+
+def test_fleet_trip_times_empty_when_no_cd_segments():
+    assert anim.fleet_trip_times({"P1": [(0, 5, "Await")]}) == {"AtoC": [], "CtoA": []}
 
 
 def test_is_node_token():

@@ -1,6 +1,6 @@
 """移動可視化（Run solver の解を時刻スライダーでアニメーション）の純粋ロジック。
 
-Run solver の結果から「各乗客が時刻 t にどこに居るか」を求められる正規化区間
+Run solver（Flow decode）の結果から「各乗客が時刻 t にどこに居るか」を求められる正規化区間
 （segs[pid] = [(t0, t1, place_token), ...]）を作り、初期配置マップと同じサイクル
 図の上に、各拠点の在籍人数と「移動中」の人（🚶徒歩 / 🚐fleet 便）を重ねて描く。
 
@@ -14,8 +14,6 @@ Streamlit に依存しない（テスト可能）。描画(st.*)は instance_edi
 """
 from __future__ import annotations
 
-from route_opt.report import build_stays
-
 
 _DEFAULT_LABELS: dict[str, str] = {
     "await": "A 待機",
@@ -24,6 +22,9 @@ _DEFAULT_LABELS: dict[str, str] = {
     "walk": "徒歩移動",
     "b_stay": "島 滞在",
     "d_stay": "D 滞在",
+    "c_wait": "C 往",
+    "c_out": "C 復",
+    "d_node": "D",
     "person_suffix": "名",
 }
 
@@ -66,6 +67,9 @@ def route_snapshot(inst) -> dict:
         "walk": d.walk_label,
         "b_stay": d.b_stay_label,
         "d_stay": d.d_stay_label,
+        "c_wait": d.c_wait_label,
+        "c_out": d.c_out_label,
+        "d_node": d.d_node_label,
         "person_suffix": d.person_suffix,
     }
     return {"sites": sites, "cd": cdd, "labels": labels,
@@ -106,60 +110,6 @@ def intervals_from_flow(inst, timeline: dict) -> dict[str, list[tuple]]:
                 ivs.append((returnA - c_a, returnA, "CtoA"))       # C→A（便）
         ivs.sort()
         # A復帰トークン: from_Bi 終了〜次区間開始（またはhorizon末尾）を Aout で埋める
-        enhanced: list[tuple] = []
-        for idx, (t0, t1, tok) in enumerate(ivs):
-            enhanced.append((t0, t1, tok))
-            if tok.startswith("from_B"):
-                next_t0 = ivs[idx + 1][0] if idx + 1 < len(ivs) else H
-                if next_t0 > t1:
-                    enhanced.append((t1, next_t0, "Aout"))
-        segs[pid] = enhanced
-    return segs
-
-
-def intervals_from_rolling(inst, result) -> dict[str, list[tuple]]:
-    """RollingResult（trips/boardings）を乗客別の (t0, t1, token) 区間列へ変換。
-
-    拠点での滞在区間は report.build_stays で再構成し、移動中（エッジ）の区間は
-    trips の出発・到着時刻から組み立てる。両者の隙間は A 待機とみなす。
-    """
-    site_index = {name: i for i, name in enumerate(inst.staffed_sites)}
-    cd = inst.cd_arm
-    a_c = cd.a_c_hours if cd else 0
-    c_a = cd.c_a_hours if cd else 0
-    d_c = cd.d_c_hours if cd else 0
-
-    segs: dict[str, list[tuple]] = {p.id: [] for p in inst.passengers}
-
-    # 1) 拠点滞在（B 島 / D）。build_stays が乗客別 site 滞在区間を返す。
-    stays = build_stays(result, inst)
-    for _, r in stays.iterrows():
-        site = r["site"]
-        tok = "D" if site == "D" else f"B{site_index[site]}"
-        segs.setdefault(r["passenger"], []).append(
-            (int(r["start_h"]), int(r["end_h"]), tok))
-
-    # 2) 移動中（エッジ）。trip の出発/到着時刻から往復の各レグを起こす。
-    for t in result.trips:
-        if t["kind"] == "B":
-            i = site_index[t["site"]]
-            for p in t["in"]:    # A→島（往路）
-                segs.setdefault(p, []).append((t["depart_A"], t["arrive_site"], f"to_B{i}"))
-            for p in t["out"]:   # 島→A（復路）
-                segs.setdefault(p, []).append((t["arrive_site"], t["return_A"], f"from_B{i}"))
-        else:  # CD トリップ
-            for p in t["in"]:    # A→C→D
-                segs.setdefault(p, []).append((t["depart_A"], t["depart_A"] + a_c, "AtoC"))
-                segs.setdefault(p, []).append((t["depart_A"] + a_c, t["arrive_site"], "CtoD"))
-            for p in t["out"]:   # D→C→A
-                depD = t["depart_A"] + (cd.d_depart_offset if cd else 0)
-                segs.setdefault(p, []).append((depD, depD + d_c, "DtoC"))
-                segs.setdefault(p, []).append((t["return_A"] - c_a, t["return_A"], "CtoA"))
-
-    H = inst.planning_horizon.hours
-    for pid in segs:
-        segs[pid].sort()
-        ivs = segs[pid]
         enhanced: list[tuple] = []
         for idx, (t0, t1, tok) in enumerate(ivs):
             enhanced.append((t0, t1, tok))
@@ -238,10 +188,10 @@ def anim_mermaid(snap: dict, node_members: dict, edge_members: dict) -> str:
         lines.append("  Await --> Bnone --> Aout")
 
     if cd is not None:
-        lines.append('  Cwait(("C 往")):::cnode')
-        lines.append('  Cout(("C 復")):::cnode')
+        lines.append(f'  Cwait(("{mm_esc(lbl["c_wait"])}")):::cnode')
+        lines.append(f'  Cout(("{mm_esc(lbl["c_out"])}")):::cnode')
         lines.append(
-            f'  D["{mm_esc("D" + chr(10) + _roster_label(node_members.get("D", []), suffix))}"]:::dnode')
+            f'  D["{mm_esc(lbl["d_node"] + chr(10) + _roster_label(node_members.get("D", []), suffix))}"]:::dnode')
         lines.append(f"  Aout -->|A→C {cd['a_c']}h{ride('AtoC')}| Cwait")
         lines.append(f"  Cwait -->|C→D {cd['c_d']}h{walk('CtoD')}| D")
         lines.append(f"  D -->|D→C {cd['d_c']}h{walk('DtoC')}| Cout")

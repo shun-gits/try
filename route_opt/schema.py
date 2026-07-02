@@ -121,7 +121,12 @@ class TemporarySite(BaseModel):
     #     {"small": {1: 12, 2: 18}, "large": {1: 16, 2: 24}}
     #   引きは「乗客の体重カテゴリ × その便の同乗総人数 n」。
     d_stay_table: dict[str, dict[int, int]] | dict[int, int]
-    occupancy_max: int | None = None
+    # D 同時在室上限。
+    # - 体重カテゴリ別に設定する場合: {weight -> 上限}   例 {"small": 5, "large": 5}
+    #   （各 weight の在室数を独立に制限。未指定の weight は無制限）
+    # - 従来形（int）: 全 weight 合算の総数上限
+    # - None: 上限なし
+    occupancy_max: dict[str, int] | int | None = None
 
     @property
     def per_weight(self) -> bool:
@@ -142,6 +147,17 @@ class TemporarySite(BaseModel):
     def required_hours(self, weight: str, n: int) -> int:
         """体重カテゴリ weight・同乗総人数 n のときの必要最低滞在h（未定義 n は 0）。"""
         return self.stay_table_for(weight).get(n, 0)
+
+    @property
+    def per_weight_occupancy(self) -> bool:
+        """occupancy_max が体重カテゴリ別か。"""
+        return isinstance(self.occupancy_max, dict)
+
+    def occupancy_max_for(self, weight: str) -> int | None:
+        """指定体重カテゴリの在室上限（未定義・上限なしは None）。int 形式は全カテゴリ共通の総数上限。"""
+        if isinstance(self.occupancy_max, dict):
+            return self.occupancy_max.get(weight)
+        return self.occupancy_max
 
 
 class VehicleType(BaseModel):
@@ -247,6 +263,9 @@ class DisplayLabels(BaseModel):
     walk_label: str = "徒歩移動"
     b_stay_label: str = "島 滞在"
     d_stay_label: str = "D 滞在"
+    c_wait_label: str = "C 往"
+    c_out_label: str = "C 復"
+    d_node_label: str = "D"
     person_suffix: str = "名"
 
 
@@ -342,6 +361,14 @@ class Instance(BaseModel):
                 if w not in self.temporary_site.d_stay_table:
                     raise ValueError(
                         f"temporary_site.d_stay_table に体重カテゴリ '{w}' の定義がありません"
+                    )
+        # occupancy_max が per-weight のとき、キーは既知の weight のみ（typo 検出）。
+        if self.temporary_site is not None and self.temporary_site.per_weight_occupancy:
+            known_w = set(self.masters.weights) | {p.weight for p in self.passengers}
+            for w in self.temporary_site.occupancy_max:
+                if w not in known_w:
+                    raise ValueError(
+                        f"temporary_site.occupancy_max の未知の体重カテゴリ '{w}'"
                     )
         return self
 

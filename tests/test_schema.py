@@ -29,6 +29,31 @@ def test_per_weight_table():
         ts.stay_table_for("medium")
 
 
+def test_occupancy_max_int_backward_compat():
+    ts = TemporarySite(d_stay_table={1: 12}, occupancy_max=5)
+    assert not ts.per_weight_occupancy
+    # int 形式は全カテゴリ共通の総数上限。
+    assert ts.occupancy_max_for("small") == 5
+    assert ts.occupancy_max_for("large") == 5
+
+
+def test_occupancy_max_per_weight():
+    ts = TemporarySite(d_stay_table={1: 12}, occupancy_max={"small": 2, "large": 3})
+    assert ts.per_weight_occupancy
+    assert ts.occupancy_max_for("small") == 2
+    assert ts.occupancy_max_for("large") == 3
+    assert ts.occupancy_max_for("medium") is None  # 未指定 weight は無制限
+
+
+def test_instance_rejects_unknown_occupancy_weight():
+    inst = load_instance("instances/full_small.yaml")
+    doc = inst.model_dump(mode="json")
+    doc["temporary_site"]["occupancy_max"] = {"huge": 3}
+    from route_opt.schema import Instance
+    with pytest.raises(ValueError, match="huge"):
+        Instance.model_validate(doc)
+
+
 def test_transit_leg_property():
     from route_opt.schema import InitialPassengerState
     assert InitialPassengerState(passenger_id="P", location="A->C").transit_leg == ("A", "C")
@@ -47,9 +72,9 @@ def test_instance_rejects_unknown_location():
 
 def test_transit_requires_cd_arm():
     # cd_arm の無いインスタンスでは島間移動中トークンは不可。
-    inst = load_instance("instances/barm_small.yaml")
-    assert inst.cd_arm is None
+    inst = load_instance("instances/full_cd.yaml")
     doc = inst.model_dump(mode="json")
+    doc["cd_arm"] = None
     doc["initial_state"][1]["location"] = "A->C"
     doc["initial_state"][1]["arrived_at"] = "2026-01-01T05:00:00"
     from route_opt.schema import Instance

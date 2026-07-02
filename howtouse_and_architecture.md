@@ -49,7 +49,7 @@ flowchart LR
 
 ## 2. アーキテクチャ全体像
 
-コードは「スキーマ／IO」→「最適化モデル」→「オーケストレーション」→「出力／可視化」→「アプリ（GUI）」の層構造。
+コードは「スキーマ／IO」→「最適化モデル」→「アプリ（GUI）／可視化」の層構造。
 
 ```mermaid
 flowchart TB
@@ -72,33 +72,18 @@ flowchart TB
     end
 
     subgraph MODEL["最適化モデル層 (OR-Tools CP-SAT)"]
-        BARM["barm_model.py<br/>B-arm 単体 (基盤)"]
-        FULL["model.py : FullModel<br/>連続時間・個体ワーカー"]
         FLOW["flow.py : FlowModel<br/>時間展開・匿名フロー"]
-    end
-
-    subgraph ORCH["オーケストレーション"]
-        ROLL["rolling.py<br/>ローリングホライズン分解"]
-        RF["run_full.py / run_rolling.py<br/>CLI エントリ"]
-    end
-
-    subgraph OUT["出力 / 可視化"]
-        REP["report.py<br/>CSV + Gantt(PNG)"]
-        BN["bench.py<br/>規模ベンチ"]
+        BN["bench.py<br/>検証用インスタンス生成"]
     end
 
     INST --> LD --> SCH
     SC --> SCFG --> SCH
     IE <--> GIO --> SCH
     ST --> SCFG
-    SCH --> BARM & FULL & FLOW
-    BARM --> FULL
-    FULL --> ROLL
-    ROLL --> REP
-    RF --> ROLL & FULL
-    IE --> FLOW & ROLL
-    ROLL --> AN
-    REP --> AN
+    SCH --> FLOW
+    BN --> SCH
+    IE --> FLOW
+    FLOW --> AN
     AN --> IE
 ```
 
@@ -108,11 +93,8 @@ flowchart TB
 |---|---|
 | [route_opt/schema.py](route_opt/schema.py) | `Instance` を頂点とする pydantic スキーマ。制約・整合性検証もここ。 |
 | [route_opt/loader.py](route_opt/loader.py) | YAML → `Instance`、休日時間帯など派生値の計算。 |
-| [route_opt/barm_model.py](route_opt/barm_model.py) | B-arm（A→B→A 交代輸送）の CP-SAT モデル。Full の基盤。 |
-| [route_opt/model.py](route_opt/model.py) | `FullModel`：B-arm + CD-arm。連続時間・個体ワーカー・ローテーション。 |
 | [route_opt/flow.py](route_opt/flow.py) | `FlowModel`：固定ダイヤ前提の時間展開フローモデル（匿名フロー＋経路分解）。長 horizon を単発で解ける。 |
-| [route_opt/rolling.py](route_opt/rolling.py) | ローリングホライズン分解ドライバ（`FullModel` を反復）。 |
-| [route_opt/report.py](route_opt/report.py) | 解 → 滞在区間再構成 → CSV / Gantt(PNG)。 |
+| [route_opt/bench.py](route_opt/bench.py) | 検証用インスタンス生成（GUI のサンプル生成・テストで使用）。 |
 | [route_opt/solver_cfg.py](route_opt/solver_cfg.py) | `configs/solver_config.yaml` 読込＋理論上限値の自動計算。 |
 | [route_opt/gui_io.py](route_opt/gui_io.py) | GUI 用 doc(JSON) ⇄ `Instance` ⇄ YAML の round-trip 変換。 |
 | [apps/instance_editor.py](apps/instance_editor.py) | メイン GUI。編集・検証・保存・求解・可視化まで一貫。 |
@@ -121,50 +103,20 @@ flowchart TB
 
 ---
 
-## 3. 2つの求解モデル
+## 3. 求解モデル
 
-同じ `Instance` を、性質の異なる2つの CP-SAT 定式化で解ける。
+`Instance` を時間展開グリッド上の CP-SAT 定式化（`FlowModel` / [flow.py](route_opt/flow.py)）で解く。
 
-| | `FullModel` ([model.py](route_opt/model.py)) | `FlowModel` ([flow.py](route_opt/flow.py)) |
-|---|---|---|
-| 定式化 | 連続時間・**個体ワーカー**（乗客を識別） | 時間展開グリッド・**匿名フロー**（コモディティ=(サイト,カテゴリ,体重)） |
-| ダイヤ | 自由ダイヤ可 | **固定ダイヤ必須**（`a_c_departures`） |
-| 長所 | 表現力が高い（任意の初期状態を扱える＝ローリング接続向き） | ワーカー対称性・弱下界を排し、**長 horizon を単発**で解ける |
-| 個体復元 | モデルが直接持つ | 求解後に FIFO で**経路分解 (`decode`)** して復元 |
-| 主用途 | ローリングホライズン分解の各ウィンドウ | GUI の単発ソルブ（Solve single, flow） |
+- 定式化: 時間展開グリッド・**匿名フロー**（コモディティ=(サイト,カテゴリ,体重)）。
+- ダイヤ: **固定ダイヤ必須**（`a_c_departures`）。
+- ワーカー対称性・弱下界を排し、**長 horizon を単発**で解ける。
+- 個体復元: 求解後に FIFO で**経路分解 (`decode`)** して復元。
 
-いずれも目的は同一：**Σ（配車台数 × 運転時間 × 時間単価）を最小化**。車両費は `A↔C` 便のみに発生。
+目的は **Σ（配車台数 × 運転時間 × 時間単価）を最小化**。車両費は `A↔C` 便のみに発生。
 
 ---
 
-## 4. ローリングホライズン分解
-
-長 horizon（およそ3週間超）は単一モデルでは feasible 解の発見が難しいため、
-[rolling.py](route_opt/rolling.py) が `FullModel` をウィンドウ反復で解く。
-
-```mermaid
-flowchart LR
-    S["initial_state"] --> W1
-    subgraph W1["Window 1 (lookahead)"]
-      direction TB
-      L1["解く: [0, look]"] --> C1["commit: [0, step] を確定"]
-    end
-    C1 -->|"終端スナップショット<br/>(位置/到着/D残滞在/直前勤務)"| W2
-    subgraph W2["Window 2"]
-      direction TB
-      L2["解く"] --> C2["commit 確定"]
-    end
-    C2 -->|"handoff"| W3["Window 3 …"]
-    W3 --> R["全区間の trips / boardings 通し結果"]
-```
-
-- `window_days`（= lookahead, 解く長さ）と `step_days`（= commit, 確定して次へ進む長さ）を指定。
-- `overlap = lookahead − commit` がシーム（境界）常駐者の余裕を生み、**§17 ローテーションを境界越しに維持**する。
-- 各ウィンドウ終端では全員が「サイト常駐 or A 待機」（移動中はいない）ため、スナップショットが一意に取れる。
-
----
-
-## 5. Agent（運用主体）の業務フロー
+## 4. Agent（運用主体）の業務フロー
 
 システムは3つの役割（Agent）が関わる。**管理者**がソルバー基盤を整え、**計画担当**がインスタンスを組んで求解し、
 **現場／閲覧者**が結果を確認する。
@@ -183,7 +135,7 @@ flowchart TD
       P2["General/Vehicles/Sites/Passengers<br/>を GUI で編集"]
       P3["Validate: スキーマ検証"]
       P4["Save: instances/ に保存"]
-      P5["Run: Solve(flow) or ローリング実行"]
+      P5["Run: Solve (flow) 実行"]
       P6["改善グラフ / Gantt / アニメで確認"]
       P1 --> P2 --> P3 --> P4 --> P5 --> P6
     end
@@ -217,7 +169,7 @@ sequenceDiagram
         Plan->>Sys: 修正して再検証
     end
     Plan->>Sys: instances/ に保存
-    Plan->>Sys: Run（Solve flow / ローリング）
+    Plan->>Sys: Run（Solve flow）
     Sys->>Sys: CP-SAT 求解（改善解を逐次記録）
     Sys-->>Out: trips / boardings / 滞在区間
     Out-->>Plan: 改善グラフ・Gantt・アニメ
@@ -229,9 +181,9 @@ sequenceDiagram
 
 ---
 
-## 6. 使い方（How to Use）
+## 5. 使い方（How to Use）
 
-### 6.1 GUI（推奨）
+### 5.1 GUI（推奨）
 
 ```bash
 # メイン: インスタンス編集～求解～可視化
@@ -245,22 +197,11 @@ streamlit run apps/solver_tuner.py
 
 `Load/New` → `General` → `Vehicles & Fleet` → `Sites` → `Passengers` → `Validate & Save` → `Run` → `移動可視化`
 
-- **Run** タブで `Solve (single, flow)`（`FlowModel`）またはローリング実行を選ぶ。
+- **Run** タブで `Solve (single, flow)`（`FlowModel`）を実行する。
 - 求解中の改善解は逐次記録され、「解の改善グラフ（時刻×コスト）」で確認できる。
 - **移動可視化** タブでタイムスライダーにより各拠点の在籍・移動中人数をアニメーション表示。
 
-### 6.2 CLI
-
-```bash
-# 単一ウィンドウで Full モデルを解く
-python -m route_opt.run_full instances/full_small.yaml
-
-# ローリングホライズン（lookahead=6日, commit=5日）で解き CSV+Gantt を出力
-python -m route_opt.run_rolling instances/full_cd.yaml 6 5
-# → out/trips.csv, out/stays.csv, out/schedule_gantt.png
-```
-
-### 6.3 インスタンスの構造（YAML）
+### 5.2 インスタンスの構造（YAML）
 
 `Instance`（[route_opt/schema.py:233](route_opt/schema.py#L233)）の主な要素:
 
@@ -275,26 +216,22 @@ python -m route_opt.run_rolling instances/full_cd.yaml 6 5
 
 ---
 
-## 7. データフロー（求解1回の流れ）
+## 6. データフロー（求解1回の流れ）
 
 ```mermaid
 flowchart LR
     Y["instances/*.yaml"] -->|load_instance| I["Instance<br/>(検証済)"]
     Cfg["solver_config.yaml"] -->|solver_cfg| SP["SolverParams"]
-    I --> M{"求解モデル"}
+    I --> M["FlowModel"]
     SP --> M
-    M -->|FlowModel| FS["FlowSolution.decode()<br/>個体タイムライン"]
-    M -->|rolling→FullModel| RR["RollingResult<br/>trips / boardings"]
+    M --> FS["FlowSolution.decode()<br/>個体タイムライン"]
     FS --> AN["anim: segs[pid]<br/>時刻別の居場所"]
-    RR --> REP["report: build_stays<br/>CSV / Gantt"]
-    RR --> AN
     AN --> UI["Streamlit 表示"]
-    REP --> Files["out/*.csv, *.png"]
 ```
 
 ---
 
-## 8. 参考ドキュメント
+## 7. 参考ドキュメント
 
 - [spec.md](spec.md) — 問題仕様（制約の定義・確定事項）
 - [model.md](model.md) — CP-SAT 定式化の詳細

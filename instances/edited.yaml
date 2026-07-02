@@ -1,20 +1,21 @@
 planning_horizon:
-  start: '2026-01-01T00:00:00'
-  end: '2026-02-15T04:00:00'
+  start: '2026-07-01T00:00:00'
+  end: '2026-08-01T04:00:00'
 time_granularity_hours: 1
 calendar:
-  holidays: []
+  holidays:
+  - 2026/07/20
 vehicle_types:
   minivan:
     capacity: 4
-    cost_per_hour: 100
+    cost_per_hour: 14000
   truck:
     capacity: 10
-    cost_per_hour: 180
+    cost_per_hour: 14200
 fleet:
   owned:
   - id: VAN001
-    type: minivan
+    type: truck
     initial_location: A
     a_c_departures:
     - 9
@@ -34,6 +35,20 @@ staffed_sites:
     segments:
       inbound_hours: 1
       outbound_hours: 1
+  B2:
+    occupancy_min: 2
+    occupancy_max: 2
+    category_requirements:
+      Category3: 2
+    stay:
+      min_hours: 24
+      max_hours: 24
+    replacement_required: true
+    ride_together:
+    - - Category3
+    segments:
+      inbound_hours: 2
+      outbound_hours: 2
 cd_arm:
   a_c_hours: 24
   c_d_hours: 1
@@ -41,14 +56,29 @@ cd_arm:
   c_a_hours: 24
 temporary_site:
   d_stay_table:
-    1: 12
-    2: 18
-    3: 24
-  occupancy_max: null
+    small:
+      1: 96
+      2: 96
+      3: 96
+      4: 96
+      5: 96
+    large:
+      1: 72
+      2: 72
+      3: 96
+      4: 96
+      5: 96
+      6: 96
+      7: 120
+      8: 120
+  occupancy_max:
+    small: 5
+    large: 5
 masters:
   categories:
   - Category1
   - Category2
+  - Category3
   weights:
   - small
   - large
@@ -68,6 +98,12 @@ passengers:
 - id: '5'
   category: Category1
   weight: small
+- id: '6'
+  category: Category1
+  weight: small
+- id: '7'
+  category: Category1
+  weight: small
 - id: '11'
   category: Category2
   weight: small
@@ -83,6 +119,48 @@ passengers:
 - id: '15'
   category: Category2
   weight: small
+- id: '16'
+  category: Category2
+  weight: small
+- id: '17'
+  category: Category2
+  weight: small
+- id: '211'
+  category: Category3
+  weight: large
+- id: '212'
+  category: Category3
+  weight: large
+- id: '213'
+  category: Category3
+  weight: large
+- id: '214'
+  category: Category3
+  weight: large
+- id: '215'
+  category: Category3
+  weight: large
+- id: '216'
+  category: Category3
+  weight: large
+- id: '221'
+  category: Category3
+  weight: large
+- id: '222'
+  category: Category3
+  weight: large
+- id: '223'
+  category: Category3
+  weight: large
+- id: '224'
+  category: Category3
+  weight: large
+- id: '225'
+  category: Category3
+  weight: large
+- id: '226'
+  category: Category3
+  weight: large
 passenger_rules:
   '1':
     allowed_sites:
@@ -97,6 +175,12 @@ passenger_rules:
     allowed_sites:
     - B1
   '5':
+    allowed_sites:
+    - B1
+  '6':
+    allowed_sites:
+    - B1
+  '7':
     allowed_sites:
     - B1
   '11':
@@ -114,9 +198,49 @@ passenger_rules:
   '15':
     allowed_sites:
     - B1
-await_min_by_category:
-  Category1: 1
-  Category2: 1
+  '16':
+    allowed_sites:
+    - B1
+  '17':
+    allowed_sites:
+    - B1
+  '211':
+    allowed_sites:
+    - B2
+  '212':
+    allowed_sites:
+    - B2
+  '213':
+    allowed_sites:
+    - B2
+  '214':
+    allowed_sites:
+    - B2
+  '215':
+    allowed_sites:
+    - B2
+  '216':
+    allowed_sites:
+    - B2
+  '221':
+    allowed_sites:
+    - B2
+  '222':
+    allowed_sites:
+    - B2
+  '223':
+    allowed_sites:
+    - B2
+  '224':
+    allowed_sites:
+    - B2
+  '225':
+    allowed_sites:
+    - B2
+  '226':
+    allowed_sites:
+    - B2
+await_min_by_category: {}
 initial_state:
 - passenger_id: '1'
   location: B1
@@ -135,6 +259,14 @@ initial_state:
   earliest_departure: null
   last_duty: null
 - passenger_id: '5'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '6'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '7'
   location: A
   earliest_departure: null
   last_duty: null
@@ -158,11 +290,70 @@ initial_state:
   location: A
   earliest_departure: null
   last_duty: null
+- passenger_id: '16'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '17'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '211'
+  location: A->C
+  arrived_at: '2026-07-01T15:00:00'
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '212'
+  location: A->C
+  arrived_at: '2026-07-01T15:00:00'
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '213'
+  location: B2
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '214'
+  location: B2
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '215'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '216'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '221'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '222'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '223'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '224'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '225'
+  location: A
+  earliest_departure: null
+  last_duty: null
+- passenger_id: '226'
+  location: A
+  earliest_departure: null
+  last_duty: null
 solver:
   max_visits_per_passenger: 4
   trips_per_site: 8
   trips_cd: 6
   max_seconds: 60.0
+  relative_gap: 0.0
   commit_hours: null
 display:
   await_label: A 待機
@@ -172,3 +363,4 @@ display:
   b_stay_label: 島 滞在
   d_stay_label: D 滞在
   person_suffix: 名
+  x_axis_mode: hour

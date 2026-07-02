@@ -52,6 +52,21 @@ def test_d_stay_table_per_weight_roundtrip():
     assert sorted(gui_io.d_stay_hours(per)) == [12, 16, 18, 24]
 
 
+def test_occupancy_max_roundtrip():
+    per = {"small": 2, "large": 3}
+    assert gui_io.rows_to_occupancy_max(gui_io.occupancy_max_to_rows(per)) == per
+    # int（総数上限）は weight='*' の1行 <-> int
+    rows = gui_io.occupancy_max_to_rows(5)
+    assert rows == [{"weight": "*", "max": 5}]
+    assert gui_io.rows_to_occupancy_max(rows) == 5
+    # None（無制限）は行なし <-> None
+    assert gui_io.occupancy_max_to_rows(None) == []
+    assert gui_io.rows_to_occupancy_max([]) is None
+    # per-weight 行があれば '*' 行は無視（rows_to_d_stay_table と同じ規則）
+    mixed = [{"weight": "*", "max": 9}, {"weight": "small", "max": 2}]
+    assert gui_io.rows_to_occupancy_max(mixed) == {"small": 2}
+
+
 def test_ride_together_roundtrip():
     groups = [["Category1", "Category2"], ["Category3", "Category4"]]
     s = gui_io.ride_together_to_str(groups)

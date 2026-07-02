@@ -33,11 +33,8 @@ import streamlit.components.v1 as components  # noqa: E402
 from apps import anim as anim_mod  # noqa: E402
 from route_opt import gui_io  # noqa: E402
 from route_opt.bench import make_instance  # noqa: E402
-from route_opt.flow import FlowModel, FlowUnsupported, k_best_costs  # noqa: E402
+from route_opt.flow import FlowModel, FlowUnsupported, SolutionRecorder, k_best_costs  # noqa: E402
 from route_opt.loader import load_instance  # noqa: E402
-from route_opt.model import FullModel, SolutionRecorder  # noqa: E402
-from route_opt.report import plot_gantt, trips_df, write_csv  # noqa: E402
-from route_opt.rolling import solve_rolling  # noqa: E402
 from route_opt.solver_cfg import solver_params_for  # noqa: E402
 
 INSTANCES = pathlib.Path("instances")
@@ -211,6 +208,19 @@ def tab_general():
         "人数の単位", disp.get("person_suffix") or "名",
         help="在籍人数の後ろに付く単位文字列（例: 名, 人, pax）。",
         key="disp_suffix")
+    c8, c9, c10 = st.columns(3)
+    disp["c_wait_label"] = c8.text_input(
+        "C 往ノード名", disp.get("c_wait_label") or "C 往",
+        help="サイクル図の C 往（A→C 到着後・C→D 出発前）ノード名。",
+        key="disp_c_wait")
+    disp["c_out_label"] = c9.text_input(
+        "C 復ノード名", disp.get("c_out_label") or "C 復",
+        help="サイクル図の C 復（D→C 到着後・C→A 出発前）ノード名。",
+        key="disp_c_out")
+    disp["d_node_label"] = c10.text_input(
+        "D ノード名", disp.get("d_node_label") or "D",
+        help="サイクル図の D ノード名。",
+        key="disp_d_node")
 
     cur_mode = disp.get("x_axis_mode") or "hour"
     if cur_mode not in _X_AXIS_MODES:
@@ -294,6 +304,9 @@ def _labels_from_doc(doc: dict) -> dict[str, str]:
         "walk": str(d.get("walk_label") or "徒歩移動"),
         "b_stay": str(d.get("b_stay_label") or "島 滞在"),
         "d_stay": str(d.get("d_stay_label") or "D 滞在"),
+        "c_wait": str(d.get("c_wait_label") or "C 往"),
+        "c_out": str(d.get("c_out_label") or "C 復"),
+        "d_node": str(d.get("d_node_label") or "D"),
         "person_suffix": str(d.get("person_suffix") or "名"),
     }
 
@@ -374,9 +387,9 @@ def _sites_mermaid(doc: dict) -> str:
     ca = cd.get("c_a_hours", "?")
     hrs = gui_io.d_stay_hours(tmp.get("d_stay_table", {}))
     d_sub = f"滞在{min(hrs)}〜{max(hrs)}h" if hrs else "一時サイト"
-    lines.append('  Cwait(("C 往")):::cnode')
-    lines.append('  Cout(("C 復")):::cnode')
-    lines.append(f'  D["{_mm_esc("D" + chr(10) + d_sub)}"]:::dnode')
+    lines.append(f'  Cwait(("{_mm_esc(lbl["c_wait"])}")):::cnode')
+    lines.append(f'  Cout(("{_mm_esc(lbl["c_out"])}")):::cnode')
+    lines.append(f'  D["{_mm_esc(lbl["d_node"] + chr(10) + d_sub)}"]:::dnode')
     lines.append(f"  Aout -->|A→C {ac}h| Cwait")
     lines.append(f"  Cwait -->|C→D {cdh}h| D")
     lines.append(f"  D -->|D→C {dc}h| Cout")
@@ -454,11 +467,17 @@ def tab_sites():
                 if st.button(f"削除 {name}", key=f"del_{name}"):
                     del sites[name]
                     st.rerun()
-                c = st.columns(2)
+                c = st.columns(3)
                 s["occupancy_min"] = int(c[0].number_input("occupancy_min", 0, 50,
                                          int(s.get("occupancy_min", 0)), key=f"occ_{name}",
                                          help="このサイトに常に駐在していなければならない最低人数。"))
-                s["replacement_required"] = c[1].checkbox("replacement_required",
+                occmax_str = c[1].text_input(
+                    "occupancy_max（空欄=無制限）",
+                    "" if s.get("occupancy_max") is None else str(s["occupancy_max"]),
+                    key=f"occmax_{name}",
+                    help="このサイトに同時に駐在できる最大人数。空欄にすると上限なし。")
+                s["occupancy_max"] = int(occmax_str) if occmax_str.strip() else None
+                s["replacement_required"] = c[2].checkbox("replacement_required",
                                               bool(s.get("replacement_required", True)), key=f"rep_{name}",
                                               help="ON: 現在の駐在員が帰る前に交代要員の到着が必須。OFF: 空席を許容。")
                 s.setdefault("stay", {})
@@ -518,16 +537,35 @@ def tab_sites():
         )
         d = doc.get("temporary_site") or {"d_stay_table": {1: 12}, "occupancy_max": None}
         st.caption(
-            "列: **weight**=体重カテゴリ（small / large、`*` で全カテゴリ共通）、"
+            "列: **weight**=体重カテゴリ（Masters の weights から選択、`*` で全カテゴリ共通）、"
             "**n**=その便の同乗総人数、**hours**=必要な最低滞在時間。"
         )
-        rows = _editor(gui_io.d_stay_table_to_rows(d.get("d_stay_table", {})),
-                       ["weight", "n", "hours"], "dtable")
+        dtable_w_opts = ["*", *gui_io.weight_options(doc)]
+        rows = _editor(
+            gui_io.d_stay_table_to_rows(d.get("d_stay_table", {})),
+            ["weight", "n", "hours"], "dtable",
+            column_config={
+                "weight": st.column_config.SelectboxColumn(
+                    "weight", options=dtable_w_opts,
+                    help="Masters の weights から選択（`*` で全カテゴリ共通）。"),
+            },
+        )
         d["d_stay_table"] = gui_io.rows_to_d_stay_table(rows)
-        cap = st.text_input("occupancy_max（空欄=無制限）",
-                            "" if d.get("occupancy_max") is None else str(d["occupancy_max"]),
-                            help="D サイトに同時に滞在できる最大人数。空欄にすると上限なし。")
-        d["occupancy_max"] = int(cap) if cap.strip() else None
+        st.caption(
+            "occupancy_max: D に同時に滞在できる最大人数。"
+            "**weight** ごとに独立した上限を設定できます（`*` は全カテゴリ合算の総数上限、"
+            "行なし=無制限）。"
+        )
+        occ_rows = _editor(
+            gui_io.occupancy_max_to_rows(d.get("occupancy_max")),
+            ["weight", "max"], "docc",
+            column_config={
+                "weight": st.column_config.SelectboxColumn(
+                    "weight", options=dtable_w_opts,
+                    help="Masters の weights から選択（`*` で全カテゴリ合算）。"),
+            },
+        )
+        d["occupancy_max"] = gui_io.rows_to_occupancy_max(occ_rows)
         doc["temporary_site"] = d
 
     # 編集後の doc を使って左カラムのサイクル図を描画（双方向：B 島クリックで selected_name に反映）。
@@ -656,7 +694,8 @@ def tab_passengers():
             "計画開始時点での各乗客の状態を、経路設定に基づくフォームで設定します。"
             "**location**: A（本拠点）/ B 島名 / D（一時サイト）/ "
             "A->C（D へ向かう移動中）/ C->A（D から A へ戻る移動中）から選択します。"
-            "**arrived_at**: 現地への到着日時（ISO 8601）。空欄の場合は計画開始時刻とみなします。"
+            "**arrived_at**: 現地への到着日時。カレンダーと時刻ピッカーで選択します。"
+            "未選択の場合は計画開始時刻とみなします。"
             "A->C は D 到着時刻、C->A は A 到着時刻を指し、いずれも必須です。"
         )
 
@@ -676,10 +715,11 @@ def tab_passengers():
             st.info("乗客が未定義です。上の Passengers で追加してください。")
             doc["initial_state"] = []
         else:
-            hdr = st.columns([3, 3, 4])
+            hdr = st.columns([3, 3, 2, 2])
             hdr[0].markdown("**passenger**")
             hdr[1].markdown("**location**")
-            hdr[2].markdown("**arrived_at (ISO 8601)**")
+            hdr[2].markdown("**arrived_at 日付**")
+            hdr[3].markdown("**arrived_at 時刻**")
             out = []
             for p in passengers:
                 pid = str(p.get("id", "")).strip()
@@ -690,8 +730,15 @@ def tab_passengers():
                 if cur_loc not in loc_options:
                     cur_loc = "A"
                 cur_at = str(cur.get("arrived_at") or "").strip()
+                cur_at_date, cur_at_time = None, None
+                if cur_at:
+                    try:
+                        cur_at_dt = _dt.datetime.fromisoformat(cur_at)
+                        cur_at_date, cur_at_time = cur_at_dt.date(), cur_at_dt.time()
+                    except ValueError:
+                        pass
 
-                row = st.columns([3, 3, 4])
+                row = st.columns([3, 3, 2, 2])
                 row[0].markdown(f"`{pid}`")
                 loc = row[1].selectbox(
                     "location", loc_options, index=loc_options.index(cur_loc),
@@ -699,13 +746,17 @@ def tab_passengers():
                     help="経路設定に基づく拠点・移動区間から選択します。")
                 # arrived_at は移動中（A->C / C->A）では必須、それ以外は任意。
                 is_transit = loc in transit_locs
-                at = row[2].text_input(
-                    "arrived_at",
-                    cur_at,
-                    key=f"init_at_{pid}", label_visibility="collapsed",
-                    placeholder="必須: 到着日時" if is_transit else "任意（空欄=計画開始時刻）",
-                    help="ISO 8601 形式の到着日時。A->C / C->A では必須です。")
-                at = at.strip()
+                at_date = row[2].date_input(
+                    "arrived_at date", value=cur_at_date,
+                    key=f"init_at_date_{pid}", label_visibility="collapsed",
+                    help="到着日をカレンダーから選択します。"
+                         "未選択（空欄=計画開始時刻）。")
+                at_time = row[3].time_input(
+                    "arrived_at time", value=cur_at_time,
+                    key=f"init_at_time_{pid}", label_visibility="collapsed",
+                    help="到着時刻を選択します。日付未選択の場合は無視されます。")
+                at = (_dt.datetime.combine(at_date, at_time or _dt.time(0, 0)).isoformat()
+                      if at_date else "")
                 if is_transit and not at:
                     row[2].warning("arrived_at は必須です")
 
@@ -778,14 +829,12 @@ def _show_improvement(rows: list[dict], header: bool = True) -> None:
     rows は SolutionRecorder が記録した改善解の列。ソルバーがより安い解を
     見つけるたびにコストが下がる様子（最後の点が採用解）と、下限（bound）が
     どこまで上がったか（コストとの差 = gap、0 まで縮めば最適確定）を示す。
-    header=False のときは見出しを描かない（Rolling の各ウィンドウ内で再利用する）。
     """
     if header:
         st.subheader("解の改善グラフ（時刻×コスト）")
     if not rows:
         st.warning("時間内に feasible 解が見つかりませんでした（改善グラフなし）。"
-                   "規模が大きすぎる可能性があります。max_seconds を増やすか "
-                   "Rolling horizon を試してください。")
+                   "規模が大きすぎる可能性があります。max_seconds を増やしてください。")
         return
     st.caption(
         "ソルバーがより安い feasible 解を見つけるたびにコスト（青）が下がります。"
@@ -1003,9 +1052,9 @@ def _initial_state_mermaid(doc: dict) -> str:
     cdh = cd.get("c_d_hours", "?")
     dc = cd.get("d_c_hours", "?")
     ca = cd.get("c_a_hours", "?")
-    lines.append('  Cwait(("C 往")):::cnode')
-    lines.append('  Cout(("C 復")):::cnode')
-    lines.append(f'  D["{_mm_esc("D" + chr(10) + _roster("D"))}"]:::dnode')
+    lines.append(f'  Cwait(("{_mm_esc(lbl["c_wait"])}")):::cnode')
+    lines.append(f'  Cout(("{_mm_esc(lbl["c_out"])}")):::cnode')
+    lines.append(f'  D["{_mm_esc(lbl["d_node"] + chr(10) + _roster("D"))}"]:::dnode')
     lines.append(f"  Aout -->|A→C {ac}h| Cwait")
     lines.append(f"  Cwait -->|C→D {cdh}h| D")
     lines.append(f"  D -->|D→C {dc}h| Cout")
@@ -1244,8 +1293,8 @@ def tab_animation():
     anim = st.session_state.get("anim")
     if not anim:
         st.info(
-            "まだ解がありません。**Run** タブで「Solve (single, flow)」または "
-            "「Solve (rolling)」を実行すると、その結果がここで可視化できるようになります。"
+            "まだ解がありません。**Run** タブで「Solve (single, flow)」を実行すると、"
+            "その結果がここで可視化できるようになります。"
         )
         return
 
