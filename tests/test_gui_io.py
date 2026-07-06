@@ -150,3 +150,23 @@ def test_merge_initial_state_clears_arrived_at_when_blank():
 def test_merge_initial_state_new_passenger_has_no_extra_keys():
     rec = gui_io.merge_initial_state({}, "P009", "A", None)
     assert rec == {"passenger_id": "P009", "location": "A"}
+
+
+def test_weekend_dates_in_range_covers_only_sat_sun():
+    # 2026-01-01(木)〜2026-01-14(水): 土日は 1/3,1/4,1/10,1/11 の4日。
+    got = gui_io.weekend_dates_in_range("2026-01-01", "2026-01-14")
+    assert got == ["2026-01-03", "2026-01-04", "2026-01-10", "2026-01-11"]
+
+
+def test_weekend_dates_in_range_swaps_reversed_bounds():
+    assert (gui_io.weekend_dates_in_range("2026-01-14", "2026-01-01")
+            == gui_io.weekend_dates_in_range("2026-01-01", "2026-01-14"))
+
+
+def test_weekend_dates_in_range_invalid_returns_empty():
+    assert gui_io.weekend_dates_in_range("not-a-date", "2026-01-14") == []
+
+
+def test_merge_date_list_dedupes_and_sorts():
+    merged = gui_io.merge_date_list(["2026-01-10", "2026-01-03"], ["2026-01-04", "2026-01-03"])
+    assert merged == ["2026-01-03", "2026-01-04", "2026-01-10"]

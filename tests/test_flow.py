@@ -237,6 +237,62 @@ def test_transit_leg_a2c_supported():
     assert p5[0]["returnA"] - p5[0]["arriveD"] >= ts.required_hours("small", 1)
 
 
+def test_owned_vehicle_holiday_excludes_departures():
+    """車両ごとの holidays: 当日はその車両の便を avail に計上しない（他車は影響なし）。"""
+    inst = _tt(3, 1, 2)
+    start = inst.planning_horizon.start
+    owned = inst.fleet.owned
+    assert len(owned) == 2
+    new_owned = [owned[0],
+                 owned[1].model_copy(update={"holidays": [start.date().isoformat()]})]
+    inst = inst.model_copy(update={"fleet": inst.fleet.model_copy(update={"owned": new_owned})})
+    mdl = FlowModel(inst)
+    # day0（0..23h）は休日車両を除いた1台分のみ
+    assert mdl.avail.get((0, "minivan"), 0) == 1
+    assert mdl.avail.get((6, "minivan"), 0) == 1
+    # day1（24h~）は両方稼働
+    assert mdl.avail.get((24, "minivan"), 0) == 2
+
+
+def _single_site_instance(*, site_holidays):
+    """occupancy_min=1・初期は誰も B に居ない最小インスタンス（holidays 検証用）。"""
+    start = datetime(2026, 1, 1)
+    return Instance(
+        planning_horizon=PlanningHorizon(start=start, end=start + timedelta(days=2)),
+        calendar=Calendar(holidays=[]),
+        vehicle_types={"minivan": VehicleType(capacity=4, cost_per_hour=100)},
+        fleet=Fleet(owned=[OwnedVehicle(id="VAN1", type="minivan", a_c_departures=DEP)]),
+        staffed_sites={"B1": StaffedSite(
+            occupancy_min=1, category_requirements={},
+            stay=Stay(min_hours=24, max_hours=48), replacement_required=True,
+            ride_together=[], segments=Segments(inbound_hours=2, outbound_hours=2),
+            holidays=site_holidays)},
+        cd_arm=CDArm(a_c_hours=3, c_d_hours=1, d_c_hours=1, c_a_hours=3),
+        temporary_site=TemporarySite(d_stay_table={1: 12}, occupancy_max=None),
+        passengers=[Passenger(id="P1", category="Cat1", weight="small")],
+        passenger_rules={"P1": PassengerRule(allowed_sites=["B1"])},
+        initial_state=[InitialPassengerState(passenger_id="P1", location="A")],
+    )
+
+
+def test_site_without_holiday_infeasible_at_horizon_start():
+    """holidays 未設定だと、誰も間に合わない g=0 の occupancy_min で即 infeasible。"""
+    inst = _single_site_instance(site_holidays=[])
+    mdl = FlowModel(inst)
+    sol = mdl.solve(max_seconds=5)
+    assert not sol.ok
+
+
+def test_site_holiday_relaxes_occupancy_requirement():
+    """サイトの非稼働待機日を horizon 初日に設定すると、その日は occupancy_min を
+    課さず、駐在員は A で待機してよい（歩いて到着後の日からは通常どおり要求）。"""
+    start = datetime(2026, 1, 1)
+    inst = _single_site_instance(site_holidays=[start.date().isoformat()])
+    mdl = FlowModel(inst)
+    sol = mdl.solve(max_seconds=10)
+    assert sol.ok, sol.summary()
+
+
 def test_transit_leg_c2a_supported():
     inst = _transit_instance()
     mdl = FlowModel(inst)

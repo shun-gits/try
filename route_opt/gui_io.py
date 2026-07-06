@@ -238,6 +238,48 @@ def rows_to_occupancy_max(rows: list[dict]):
     return per if per else flat
 
 
+# ---- 汎用カンマ区切り文字列リスト（holidays の日付など） ----
+def csv_list_to_str(items: list[str]) -> str:
+    return ", ".join(str(x) for x in items)
+
+
+def str_to_csv_list(s: str) -> list[str]:
+    out: list[str] = []
+    for tok in str(s or "").replace("、", ",").split(","):
+        tok = tok.strip()
+        if tok:
+            out.append(tok)
+    return out
+
+
+# ---- holidays 入力補助: 期間内の土日の一括追加 ----
+def weekend_dates_in_range(start: str, end: str) -> list[str]:
+    """[start, end]（YYYY-MM-DD, 両端含む）の範囲内の土日日付を昇順で返す。
+    holidays 手入力の手間を減らす「期間の土日を1クリックで追加」機能用。
+    範囲が逆順で渡されても入れ替えて解釈する。無効な日付は空リスト。"""
+    import datetime as _dt
+
+    try:
+        d0 = _dt.date.fromisoformat(str(start)[:10])
+        d1 = _dt.date.fromisoformat(str(end)[:10])
+    except ValueError:
+        return []
+    if d1 < d0:
+        d0, d1 = d1, d0
+    out: list[str] = []
+    d = d0
+    while d <= d1:
+        if d.weekday() >= 5:   # 5=土, 6=日
+            out.append(d.isoformat())
+        d += _dt.timedelta(days=1)
+    return out
+
+
+def merge_date_list(existing: list[str], new: list[str]) -> list[str]:
+    """既存の日付リストに新しい日付を重複除外・昇順ソートして統合する。"""
+    return sorted({str(d).strip() for d in (*existing, *new) if str(d).strip()})
+
+
 # ---- ride_together (list[list[str]] <-> "Cat1,Cat2; Cat3,Cat4") ----
 def ride_together_to_str(groups: list[list[str]]) -> str:
     return "; ".join(", ".join(g) for g in groups)

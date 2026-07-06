@@ -61,6 +61,9 @@ class StaffedSite(BaseModel):
     # together グループのリスト。各グループは「全員乗車 or 全員不在」。
     ride_together: list[list[str]] = Field(default_factory=list)
     segments: Segments
+    # このサイトの非稼働待機日（YYYY-MM-DD）。当日は occupancy_min/max・
+    # category_requirements を課さない（駐在員は A で待機してよい）。
+    holidays: list[str] = Field(default_factory=list)
 
 
 class CDArm(BaseModel):
@@ -176,6 +179,9 @@ class OwnedVehicle(BaseModel):
     # 便ダイヤは全保有車両の和、各時刻スロットの提供定員は「その時刻に出発する
     # 保有車両」で決まる。空（既定）なら当該車両はダイヤを持たない。
     a_c_departures: list[int] = Field(default_factory=list)
+    # この車両の非稼働待機日（YYYY-MM-DD）。当日は a_c_departures があっても
+    # 運行せず待機する（他車両が同時刻にダイヤを持てばその便自体は運行され得る）。
+    holidays: list[str] = Field(default_factory=list)
 
     def scheduled_departures(self, commit_h: int, round_h: int) -> list[int]:
         """この車両の出発時刻を [0, commit_h] 全日に展開して返す。"""

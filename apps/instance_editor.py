@@ -103,6 +103,41 @@ def _editor(rows: list[dict], cols, key: str, column_config=None) -> list[dict]:
     return edited.to_dict("records")
 
 
+def _refresh_editor(key: str) -> None:
+    """指定した _editor(key=key) のキャンバスを次回描画時に doc の最新値で作り直させる
+    （doc_version は進めない＝他の編集グリッドの入力途中の状態には影響しない）。"""
+    st.session_state.pop(f"_editor_base::{key}", None)
+    st.session_state.pop(f"_editor_ver::{key}", None)
+    st.session_state.pop(key, None)
+
+
+def _default_horizon_dates(doc: dict) -> tuple[_dt.date, _dt.date]:
+    """holidays の期間指定ピッカーの初期値（planning_horizon の開始/終了日）。"""
+    ph = doc.get("planning_horizon", {}) or {}
+
+    def _parse(s, fallback):
+        try:
+            return _dt.date.fromisoformat(str(s)[:10])
+        except (TypeError, ValueError):
+            return fallback
+
+    today = _dt.date.today()
+    start = _parse(ph.get("start"), today)
+    end = _parse(ph.get("end"), start)
+    return start, end
+
+
+def _weekend_picker(key: str, default_start: _dt.date, default_end: _dt.date) -> list[str] | None:
+    """「開始日・終了日・追加ボタン」を描画し、押されたときだけその期間の土日日付
+    （YYYY-MM-DD 昇順）を返す（holidays 手入力の手間を減らす）。押されなければ None。"""
+    c = st.columns([2, 2, 1])
+    ws = c[0].date_input("土日追加: 開始日", default_start, key=f"{key}_wstart")
+    we = c[1].date_input("土日追加: 終了日", default_end, key=f"{key}_wend")
+    if c[2].button("土日を追加", key=f"{key}_wbtn", help="指定期間内の土曜・日曜をすべて holidays に追加します（既存の日付は保持）。"):
+        return gui_io.weekend_dates_in_range(ws.isoformat(), we.isoformat())
+    return None
+
+
 def _dedup_strip(values) -> list[str]:
     """文字列イテラブルを strip し、空と重複を除いて順序を保って返す（マスタ用）。"""
     out: list[str] = []
@@ -164,10 +199,20 @@ def tab_general():
                               help="計画の終了日時。例: 2025-01-15T00:00:00")
     st.caption(f"time_granularity_hours = {doc.get('time_granularity_hours', 1)}（1h 固定）")
     st.markdown("**Calendar — holidays（YYYY-MM-DD）**")
-    st.caption("ソルバーが考慮する休日を追加します。休日は輸送コストや制約に影響します。")
-    rows = [{"date": d} for d in doc.get("calendar", {}).get("holidays", [])]
+    st.caption(
+        "ソルバーが考慮する休日を追加します。休日は輸送コストや制約に影響します。"
+        "期間を指定すると、その範囲内の土日を1クリックでまとめて追加できます（後で個別に調整可）。"
+    )
+    cal = doc.setdefault("calendar", {})
+    def_start, def_end = _default_horizon_dates(doc)
+    added = _weekend_picker("cal_holidays", def_start, def_end)
+    if added is not None:
+        cal["holidays"] = gui_io.merge_date_list(cal.get("holidays", []), added)
+        _refresh_editor("holidays")
+        st.toast(f"土日 {len(added)} 件を追加しました（重複は自動除外）")
+    rows = [{"date": d} for d in cal.get("holidays", [])]
     rows = _editor(rows, ["date"], "holidays")
-    doc.setdefault("calendar", {})["holidays"] = [
+    cal["holidays"] = [
         str(r["date"]).strip() for r in rows if str(r.get("date", "")).strip()
     ]
 
@@ -255,17 +300,39 @@ def tab_vehicles():
         "自社保有車両の一覧です。"
         "列: **id**=車両固有 ID、**type**=上で定義した vehicle_types の名前、"
         "**initial_location**=計画開始時の初期位置（例: A）、"
-        "**a_c_departures**=その車両の A→C 便の固定ダイヤ（1日の出発時刻・時。例: 6, 14）。"
+        "**a_c_departures**=その車両の A→C 便の固定ダイヤ（1日の出発時刻・時。例: 6, 14）、"
+        "**holidays**=この車両の非稼働待機日（YYYY-MM-DD、カンマ区切りで複数可）。"
         "便ダイヤは全車の和、各時刻の定員は「その時刻に出発する車両」で決まります"
         "（同じ時刻に2台置けば定員2台分）。空欄ならその車両はダイヤを持ちません。"
+        "holidays を指定した日はその車両は運行せず待機します（他車両に同時刻ダイヤがあれば便自体は運行され得ます）。"
     )
     fleet = doc.setdefault("fleet", {"owned": []})
+    veh_ids = [str(v.get("id", "")).strip() for v in fleet.get("owned", [])
+               if str(v.get("id", "")).strip()]
+    if veh_ids:
+        st.caption(
+            "期間を指定して、選択した車両の holidays に土日をまとめて追加できます"
+            "（後で表を直接編集して個別調整可）。"
+        )
+        sel_vehs = st.multiselect("対象車両", veh_ids, default=veh_ids, key="fleet_wsel")
+        def_start, def_end = _default_horizon_dates(doc)
+        added = _weekend_picker("fleet_holidays", def_start, def_end)
+        if added is not None:
+            if sel_vehs:
+                for v in fleet["owned"]:
+                    if str(v.get("id", "")).strip() in sel_vehs:
+                        v["holidays"] = gui_io.merge_date_list(v.get("holidays", []), added)
+                _refresh_editor("owned")
+                st.toast(f"{len(sel_vehs)}台に土日 {len(added)} 件を追加しました（重複は自動除外）")
+            else:
+                st.warning("対象車両を選択してください")
     orows = _editor(
         [{"id": v.get("id", ""), "type": v.get("type", ""),
           "initial_location": v.get("initial_location", "A"),
-          "a_c_departures": ", ".join(str(t) for t in v.get("a_c_departures", []))}
+          "a_c_departures": ", ".join(str(t) for t in v.get("a_c_departures", [])),
+          "holidays": gui_io.csv_list_to_str(v.get("holidays", []))}
          for v in fleet.get("owned", [])],
-        ["id", "type", "initial_location", "a_c_departures"], "owned")
+        ["id", "type", "initial_location", "a_c_departures", "holidays"], "owned")
     new_owned = []
     for r in orows:
         vid = str(r.get("id", "")).strip()
@@ -284,6 +351,9 @@ def tab_vehicles():
               "initial_location": str(r.get("initial_location") or "A").strip()}
         if deps:
             ov["a_c_departures"] = sorted(set(deps))
+        hols = gui_io.str_to_csv_list(r.get("holidays", ""))
+        if hols:
+            ov["holidays"] = hols
         new_owned.append(ov)
     fleet["owned"] = new_owned
     fleet.pop("rental", None)   # レンタル機能は廃止
@@ -505,6 +575,19 @@ def tab_sites():
                     st.text_input("ride_together（例: Category1,Category2; Category3,Category4）",
                                   gui_io.ride_together_to_str(s.get("ride_together", [])), key=f"rt_{name}",
                                   help="同じ便に必ず同乗させるカテゴリグループ。グループ内はカンマ区切り、グループ間はセミコロン区切り。")
+                )
+                def_start, def_end = _default_horizon_dates(doc)
+                added = _weekend_picker(f"site_hol_{name}", def_start, def_end)
+                if added is not None:
+                    merged = gui_io.merge_date_list(s.get("holidays", []), added)
+                    st.session_state[f"hol_{name}"] = gui_io.csv_list_to_str(merged)
+                    st.toast(f"{name}: 土日 {len(added)} 件を追加しました（重複は自動除外）")
+                s["holidays"] = gui_io.str_to_csv_list(
+                    st.text_input("holidays（非稼働待機日, 例: 2026-01-10, 2026-01-11）",
+                                  gui_io.csv_list_to_str(s.get("holidays", [])), key=f"hol_{name}",
+                                  help="このサイトが稼働しない日（カンマ区切りで複数可）。"
+                                       "当日は occupancy_min/max・category_requirements を課さず、"
+                                       "駐在員は A で待機してよいものとして扱います。")
                 )
 
         st.divider()

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 from ortools.sat.python import cp_model
 
-from .loader import hour_offset
+from .loader import entity_holiday_hours, hour_offset
 from .schema import Instance
 
 D = "D"
@@ -96,6 +96,7 @@ class _Site:
     din: int                # A→site 徒歩
     dout: int               # site→A 徒歩
     together: list          # list[tuple[category,...]]
+    hol: set                # 非稼働待機日の時間オフセット集合（この間は占有/カテゴリ要件を課さない）
 
 
 class FlowModel:
@@ -139,13 +140,16 @@ class FlowModel:
         # ダイヤ展開（horizon 全域）: 便ダイヤ = 各保有車両の a_c_departures の和。
         # avail[(t, vtype)] = 時刻 t に出発する保有車両のうちタイプ vtype の台数。
         # 各スロットの提供定員はこの台数で上限が決まる（owned が便の定員を規定）。
+        # 車両ごとの非稼働待機日（この日は当該車両の便を avail に計上しない＝待機）。
+        start = inst.planning_horizon.start
         self.avail: dict[tuple[int, str], int] = {}
         fset: set[int] = set()
         for ov in inst.fleet.owned:
+            veh_hol = entity_holiday_hours(ov.holidays, start)
             for tau in sorted(set(ov.a_c_departures)):
                 for d in range(self.H // 24 + 1):
                     t = d * 24 + tau
-                    if 0 <= t <= self.H:
+                    if 0 <= t <= self.H and t not in veh_hol:
                         fset.add(t)
                         self.avail[t, ov.type] = self.avail.get((t, ov.type), 0) + 1
         self.ferries = sorted(fset)
@@ -158,7 +162,8 @@ class FlowModel:
                 cat_req=dict(s.category_requirements),
                 smin=s.stay.min_hours, smax=s.stay.max_hours,
                 din=s.segments.inbound_hours, dout=s.segments.outbound_hours,
-                together=[tuple(g) for g in s.ride_together])
+                together=[tuple(g) for g in s.ride_together],
+                hol=entity_holiday_hours(s.holidays, start))
         # コモディティ = (site, category, weight)
         self.comm: dict[tuple, list[str]] = {}
         self.pax_comm: dict[str, tuple] = {}
@@ -345,9 +350,12 @@ class FlowModel:
         self.ein, self.eout = ein, eout
 
         # 占有 + カテゴリ要件（サイト単位の総和 / カテゴリ別）
+        # 非稼働待機日（site.hol）は当日を稼働要件から除外し、駐在員は A 待機してよい。
         for sname, site in self.sites.items():
             ks = [k for k in comm if k[0] == sname]
             for g in range(commit):
+                if g in site.hol:
+                    continue
                 if site.occ_min:
                     m.Add(sum(Bocc[k, g] for k in ks) >= site.occ_min)
                 if site.occ_max is not None:
