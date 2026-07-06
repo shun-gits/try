@@ -194,9 +194,11 @@ def tab_general():
     st.caption("計画期間とカレンダーを設定します。")
     ph = doc["planning_horizon"]
     ph["start"] = st.text_input("planning_horizon.start (ISO 8601)", ph["start"],
-                                help="計画の開始日時。例: 2025-01-01T00:00:00")
+                                help="計画の開始日時。例: 2025-01-01T00:00:00",
+                                key="gen_ph_start")
     ph["end"] = st.text_input("planning_horizon.end (ISO 8601)", ph["end"],
-                              help="計画の終了日時。例: 2025-01-15T00:00:00")
+                              help="計画の終了日時。例: 2025-01-15T00:00:00",
+                              key="gen_ph_end")
     st.caption(f"time_granularity_hours = {doc.get('time_granularity_hours', 1)}（1h 固定）")
     st.markdown("**Calendar — holidays（YYYY-MM-DD）**")
     st.caption(
