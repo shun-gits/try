@@ -226,48 +226,49 @@ def tab_general():
     )
     disp = doc.setdefault("display", {})
     c1, c2, c3 = st.columns(3)
+    _ver = st.session_state.get("doc_version", 0)
     disp["await_label"] = c1.text_input(
         "A 待機ノード名", disp.get("await_label") or "A 待機",
         help="A 本拠点で待機中の状態ラベル（サイクル図・ガントチャート等に表示）。",
-        key="disp_await")
+        key=f"disp_await_{_ver}")
     disp["aout_label"] = c2.text_input(
         "A 復帰ノード名", disp.get("aout_label") or "A 復帰",
         help="B 島から A へ戻った後の待機状態ラベル。",
-        key="disp_aout")
+        key=f"disp_aout_{_ver}")
     disp["fleet_label"] = c3.text_input(
         "fleet 便ラベル", disp.get("fleet_label") or "fleet 便",
         help="A↔C 区間の車両便の状態ラベル（ガントチャート色分け凡例等に表示）。",
-        key="disp_fleet")
+        key=f"disp_fleet_{_ver}")
     c4, c5, c6, c7 = st.columns(4)
     disp["walk_label"] = c4.text_input(
         "徒歩移動ラベル", disp.get("walk_label") or "徒歩移動",
         help="徒歩区間（島への往復・C↔D）の状態ラベル。",
-        key="disp_walk")
+        key=f"disp_walk_{_ver}")
     disp["b_stay_label"] = c5.text_input(
         "B 島滞在ラベル", disp.get("b_stay_label") or "島 滞在",
         help="B 有人島サイトに滞在中の状態ラベル。",
-        key="disp_b_stay")
+        key=f"disp_b_stay_{_ver}")
     disp["d_stay_label"] = c6.text_input(
         "D 滞在ラベル", disp.get("d_stay_label") or "D 滞在",
         help="D 一時サイトに滞在中の状態ラベル。",
-        key="disp_d_stay")
+        key=f"disp_d_stay_{_ver}")
     disp["person_suffix"] = c7.text_input(
         "人数の単位", disp.get("person_suffix") or "名",
         help="在籍人数の後ろに付く単位文字列（例: 名, 人, pax）。",
-        key="disp_suffix")
+        key=f"disp_suffix_{_ver}")
     c8, c9, c10 = st.columns(3)
     disp["c_wait_label"] = c8.text_input(
         "C 往ノード名", disp.get("c_wait_label") or "C 往",
         help="サイクル図の C 往（A→C 到着後・C→D 出発前）ノード名。",
-        key="disp_c_wait")
+        key=f"disp_c_wait_{_ver}")
     disp["c_out_label"] = c9.text_input(
         "C 復ノード名", disp.get("c_out_label") or "C 復",
         help="サイクル図の C 復（D→C 到着後・C→A 出発前）ノード名。",
-        key="disp_c_out")
+        key=f"disp_c_out_{_ver}")
     disp["d_node_label"] = c10.text_input(
         "D ノード名", disp.get("d_node_label") or "D",
         help="サイクル図の D ノード名。",
-        key="disp_d_node")
+        key=f"disp_d_node_{_ver}")
 
     cur_mode = disp.get("x_axis_mode") or "hour"
     if cur_mode not in _X_AXIS_MODES:
@@ -277,7 +278,7 @@ def tab_general():
         index=list(_X_AXIS_MODES).index(cur_mode),
         help="移動可視化タブの時系列グラフ（ガントチャート・滞在人数推移・便数推移）の"
              "X軸を、計画開始からの経過時間(h)、または実際の日付のどちらで表示するかを選べます。",
-        key="disp_x_axis_mode")
+        key=f"disp_x_axis_mode_{_ver}")
     disp["x_axis_mode"] = next(k for k, v in _X_AXIS_MODES.items() if v == choice)
 
 
@@ -588,8 +589,9 @@ def tab_sites():
                     st.text_input("holidays（非稼働待機日, 例: 2026-01-10, 2026-01-11）",
                                   gui_io.csv_list_to_str(s.get("holidays", [])), key=f"hol_{name}",
                                   help="このサイトが稼働しない日（カンマ区切りで複数可）。"
-                                       "当日は occupancy_min/max・category_requirements を課さず、"
-                                       "駐在員は A で待機してよいものとして扱います。")
+                                       "occupancy_min/max・category_requirements は休日も"
+                                       "そのまま課されます（駐在は継続）。休日の間は滞在時間"
+                                       "（stay.min/max_hours）の経過が停止し、稼働日に再開します。")
                 )
 
         st.divider()
@@ -1032,8 +1034,6 @@ def tab_run():
         except FlowUnsupported as e:
             st.error("Flow エンジンは未対応の構成です:")
             st.code(str(e))
-            st.info("固定ダイヤ（Fleet — owned の各車両 a_c_departures）を設定し、"
-                    "各乗客の allowed_sites を単一 B サイトにしてください。")
         else:
             rec = SolutionRecorder()
             with st.spinner("solving (flow)..."):

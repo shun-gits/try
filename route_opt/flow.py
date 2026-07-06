@@ -22,9 +22,11 @@
 """
 from __future__ import annotations
 
+import bisect
 import math
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from ortools.sat.python import cp_model
 
@@ -96,7 +98,7 @@ class _Site:
     din: int                # A→site 徒歩
     dout: int               # site→A 徒歩
     together: list          # list[tuple[category,...]]
-    hol: set                # 非稼働待機日の時間オフセット集合（この間は占有/カテゴリ要件を課さない）
+    hol: set                # 非稼働待機日の時間オフセット集合（滞在クロックを停止。占有要件は課す）
 
 
 class FlowModel:
@@ -112,23 +114,33 @@ class FlowModel:
     def _validate(self):
         inst = self.inst
         if inst.cd_arm is None or inst.temporary_site is None:
-            raise FlowUnsupported("flow は cd_arm と temporary_site が必要")
+            raise FlowUnsupported(
+                "flow は cd_arm と temporary_site が必要です。\n"
+                "修正: YAML に cd_arm（a_c_hours 等）と temporary_site"
+                "（d_stay_table / occupancy_max）を設定してください。")
         if not inst.fleet.has_timetable():
             raise FlowUnsupported(
-                "flow は固定ダイヤ（保有車両の a_c_departures）が必須。"
-                "いずれの車両にもダイヤが無い（自由ダイヤ）は非対応")
+                "flow は固定ダイヤ（保有車両の a_c_departures）が必須です。"
+                "いずれの車両にもダイヤが無い（自由ダイヤ）は非対応です。\n"
+                "修正: Fleet — owned の各車両に a_c_departures（出発時刻のリスト）を"
+                "設定してください。")
         for p in inst.passengers:
             allowed = inst.allowed_sites_of(p.id)
             if len(allowed) != 1:
                 raise FlowUnsupported(
-                    f"乗客 {p.id} の allowed_sites は単一 B サイトのみ対応（実際: {allowed}）")
+                    f"乗客 {p.id} の allowed_sites は単一 B サイトのみ対応です"
+                    f"（実際: {allowed}）。\n"
+                    f"修正: passenger_rules で乗客 {p.id} の allowed_sites を"
+                    f" 1 サイトに絞ってください。")
         for st in inst.initial_state:
             if st.transit_leg is not None:
                 continue    # A->C / C->A はゴースト便として _setup() で処理
             if st.location not in (set(inst.staffed_sites) | {"A"}):
                 raise FlowUnsupported(
-                    f"初期 location '{st.location}' は未対応（B サイト在室 / A 待機 / "
-                    f"A->C・C->A のみ）")
+                    f"初期 location '{st.location}' は未対応です（対応: B サイト在室 / "
+                    f"A 待機 / A->C・C->A 移動中のみ）。\n"
+                    f"修正: initial_state の location を A・既存 B サイト名・"
+                    f"A->C・C->A のいずれかにしてください。")
 
     def _setup(self):
         inst = self.inst
@@ -206,6 +218,14 @@ class FlowModel:
                        for name, vt in inst.vehicle_types.items()}
         self._build_ghosts(transit_pids)
 
+    # エラーメッセージ用: 時間オフセット→日時文字列 / 計画期間の表示
+    def _fmt_dt(self, off: int) -> str:
+        return (self.inst.planning_horizon.start
+                + timedelta(hours=off)).strftime("%Y-%m-%d %H:%M")
+
+    def _horizon_str(self) -> str:
+        return f"{self._fmt_dt(0)} 〜 {self._fmt_dt(self.H)}（0〜{self.H}h）"
+
     def _build_ghosts(self, transit_pids: dict[str, tuple[tuple[str, str], int]]) -> None:
         """島間移動中（A->C/C->A）の初期状態を「ゴースト便」として解決する。
 
@@ -228,7 +248,12 @@ class FlowModel:
                 g = max(0, off)     # horizon 開始以前の到着は即時待機扱い
                 if g > self.H:
                     raise FlowUnsupported(
-                        f"初期 location 'C->A' の到着時刻が horizon を超えています: {pid}")
+                        f"初期 location 'C->A' の到着時刻が計画期間外です:\n"
+                        f"  対象乗客: {pid} / arrived_at = {self._fmt_dt(off)}"
+                        f"（開始から {off}h）\n"
+                        f"  計画期間: {self._horizon_str()}\n"
+                        f"修正: initial_state の arrived_at を計画期間内の日時にするか、"
+                        f"planning_horizon（start/end）を到着時刻を含む期間に変更してください。")
                 k = self.pax_comm[pid]
                 self.ghost_c2a.setdefault(k, []).append((pid, g))
                 self.ghost_refill_count[k, g] = self.ghost_refill_count.get((k, g), 0) + 1
@@ -237,10 +262,23 @@ class FlowModel:
 
         for arrived_off, cohort_pids in a2c_cohorts.items():
             n_total = len(cohort_pids)
+            if arrived_off > self.H:
+                raise FlowUnsupported(
+                    f"初期 location 'A->C' の到着時刻が計画期間外です:\n"
+                    f"  対象乗客: {', '.join(cohort_pids)} / "
+                    f"arrived_at = {self._fmt_dt(arrived_off)}（開始から {arrived_off}h）\n"
+                    f"  計画期間: {self._horizon_str()}\n"
+                    f"修正: initial_state の arrived_at を計画期間内の日時にするか、"
+                    f"planning_horizon（start/end）を到着時刻を含む期間に変更してください。"
+                    f"到着後さらに D 滞在と復路便（C→A {self.c_a}h）が期間内に収まる"
+                    f"必要があります。")
             if n_total > self.cap_max:
                 raise FlowUnsupported(
                     f"初期 location 'A->C'（到着 {arrived_off}h）の同時到着 {n_total} 名が"
-                    f" 車両定員上限 {self.cap_max} を超えています")
+                    f" 車両定員上限 {self.cap_max} を超えています。\n"
+                    f"修正: initial_state の A->C 同時到着（arrived_at が同一）の人数を"
+                    f" {self.cap_max} 名以下に分けるか、Fleet — owned に定員の大きい"
+                    f"車両タイプを追加してください。")
             by_weight: dict[str, list[str]] = {}
             for pid in cohort_pids:
                 by_weight.setdefault(self.pax_comm[pid][2], []).append(pid)
@@ -251,8 +289,15 @@ class FlowModel:
                 # （「commit 時点で全員 at rest」不変条件を保つ）。
                 if t_ret is None or home > self.commit:
                     raise FlowUnsupported(
-                        f"初期 location 'A->C'（到着 {arrived_off}h, weight={w}）を"
-                        f" commit 内で帰還させる便がありません")
+                        f"初期 location 'A->C'（到着 {arrived_off}h, weight={w}, "
+                        f"乗客: {', '.join(wpids)}）を commit（{self.commit}h）内で"
+                        f"帰還させる復路便がありません。\n"
+                        f"  必要 D 滞在 {S}h の後、C 折返し便と C→A {self.c_a}h を経て"
+                        f" {self.commit}h（{self._fmt_dt(self.commit)}）までに A へ"
+                        f"帰着できる便が必要です。\n"
+                        f"修正: planning_horizon.end の延長、solver.commit_hours の拡大、"
+                        f"または Fleet — owned の a_c_departures への便追加を"
+                        f"検討してください。")
                 self.ghost_retneed[t_ret] = self.ghost_retneed.get(t_ret, 0) + len(wpids)
                 leave_g = t_ret + (self.a_c - self.d_c)
                 self.ghost_atD.append((arrived_off, leave_g, len(wpids), w))
@@ -324,9 +369,25 @@ class FlowModel:
         for k in comm:
             for g in range(min(self.sites[k[0]].din, H + 1)):
                 m.Add(ein[k, g] == 0)
+        # 滞在クロック: サイト holidays（非稼働待機日）の間は滞在時間の経過を
+        # 停止する（駐在員は在室のまま滞在時間を消費せず、稼働日に経過を再開）。
+        # wk[t] = [0, t) の稼働時間数。pmin[g]/pmax[g] は「時刻 g までに稼働
+        # smin/smax 時間が経過している入場時刻の上限 t」（該当なしは -1）。
+        stay_win = {}
+        for sname, site in self.sites.items():
+            wk = [0] * (H + 2)
+            for h in range(H + 1):
+                wk[h + 1] = wk[h] + (0 if h in site.hol else 1)
+            pmin = [min(bisect.bisect_right(wk, wk[g] - site.smin) - 1, g)
+                    for g in range(H + 1)]
+            pmax = [min(bisect.bisect_right(wk, wk[g] - site.smax) - 1, g)
+                    for g in range(H + 1)]
+            stay_win[sname] = (pmin, pmax)
+
         Ein = {}; Eout = {}; Bocc = {}
         for k in comm:
             site = self.sites[k[0]]
+            pmin, pmax = stay_win[k[0]]
             ce = 0; co = 0
             for g in range(H + 1):
                 ce = ce + ein[k, g] + (self.init_B[k] if g == 0 else 0)
@@ -337,25 +398,25 @@ class FlowModel:
                 b = m.NewIntVar(0, Wn[k] + self.init_B[k], f"B_{k[0]}_{k[1]}_{k[2]}_{g}")
                 m.Add(b == Ein[k, g] - Eout[k, g])
                 Bocc[k, g] = b
-                # 滞在ウィンドウ: 入って min 未満では出られない / max までに出る
-                gm = g - site.smin
+                # 滞在ウィンドウ（稼働時間ベース）: 稼働 min 時間未満では出られない /
+                # 稼働 max 時間までに出る（休日は滞在時間に数えない）
+                gm = pmin[g]
                 if gm >= 0:
                     m.Add(Eout[k, g] <= Ein[k, gm])
                 else:
                     m.Add(Eout[k, g] == 0)
-                gM = g - site.smax
+                gM = pmax[g]
                 if gM >= 0:
                     m.Add(Eout[k, g] >= Ein[k, gM])
         self.Bocc = Bocc
         self.ein, self.eout = ein, eout
 
         # 占有 + カテゴリ要件（サイト単位の総和 / カテゴリ別）
-        # 非稼働待機日（site.hol）は当日を稼働要件から除外し、駐在員は A 待機してよい。
+        # 休日（site.hol）も駐在は維持する（休日の扱いは滞在クロックの停止で
+        # 表現する）ため、occupancy_min/max・カテゴリ要件は全時間帯で課す。
         for sname, site in self.sites.items():
             ks = [k for k in comm if k[0] == sname]
             for g in range(commit):
-                if g in site.hol:
-                    continue
                 if site.occ_min:
                     m.Add(sum(Bocc[k, g] for k in ks) >= site.occ_min)
                 if site.occ_max is not None:
@@ -487,9 +548,12 @@ class FlowModel:
                         m.Add(sum(atD) <= self.d_occ_max)
 
         # 下界カット（安全版 N>=ceil(T/cap)。BENCH 7.7: これ以上は列生成が必要）
+        # 休日は滞在時間を消費しない（滞在クロック停止）ため、必要訪問数は
+        # commit 内の稼働時間数で数える。
         T = 0
         for sname, site in self.sites.items():
-            nb = math.ceil(max(0, commit) / max(1, site.smin)) * max(1, site.occ_min)
+            wc = commit - sum(1 for h in site.hol if h < commit)
+            nb = math.ceil(max(0, wc) / max(1, site.smin)) * max(1, site.occ_min)
             Wsite = sum(Wn[k] for k in comm if k[0] == sname)
             T += max(0, nb - Wsite)
         if T:
